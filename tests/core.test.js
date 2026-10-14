@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, currentFeedback, activeFeedback, buildInjection, parseResult, analysisInput } from '../core.js';
+import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, currentFeedback, activeFeedback, buildInjection, parseResult, analysisInput, pendingFeedback, feedbackKey } from '../core.js';
 import { createController } from '../controller.js';
 import { callAnalyzer, completionUrl } from '../api.js';
 
@@ -17,7 +17,8 @@ function host() {
     const messages = [];
     return { ctx, messages, switchChat: next => { current = next; }, make: analyzer => createController({ getContext: () => current, notify: (...args) => messages.push(args), analyzer }) };
 }
-const result = (id, confidence = 'explicit') => JSON.stringify({ summary: '用户喜欢克制的关心。', items: [{ category: 'interaction', text: '用细微行动表达关心。', confidence, sourceIds: [id] }] });
+const reports = { interaction: { status: 'updated', reason: '有互动方式反馈。' }, plot: { status: 'insufficient', reason: '没有剧情走向证据。' }, expression: { status: 'insufficient', reason: '没有表达习惯证据。' } };
+const result = (id, confidence = 'explicit') => JSON.stringify({ summary: '用户喜欢克制的关心。', categoryReports: reports, items: [{ category: 'interaction', text: '用细微行动表达关心。', confidence, sourceIds: [id] }] });
 
 test('反馈随消息移动；切换/编辑回复后只认当前版本，回来可恢复', () => {
     const reply = { mes: '旧回复', swipe_id: 0 };
@@ -111,7 +112,7 @@ test('评过分的旧楼层与附近 user 文本也进入分析，不只看最�
     const h = host(), feedback = normalizeFeedback({ plot: 5 });
     h.ctx.chat[1].extra = { [KEY]: { versions: { [revisionOf(h.ctx.chat[1])]: feedback } } };
     h.ctx.chat.push(...Array.from({ length: 30 }, (_, i) => ({ mes: `后续 ${i}`, is_user: i % 2 === 0 })));
-    const data = JSON.parse(analysisInput(h.ctx, newState(), { ...DEFAULTS, contextWindow: 2 }).prompt);
+    const data = JSON.parse(analysisInput(h.ctx, newState(), { ...DEFAULTS, contextWindow: 2, recentUserTurns: 50 }).prompt);
     assert.equal(data.transcript[0].text, '我有点冷。');
     assert.equal(data.feedback[0].id, feedback.id); assert.equal(data.transcript.at(-1).floor, 31);
 });
@@ -233,4 +234,103 @@ test('加载插件时流仍在输出，缺少 host live 接口也不能提前保
     await assert.rejects(ctl.saveFeedback(1, { plot: 5 }), /生成完成/);
     h.ctx.streamingProcessor.isFinished = true;
     await ctl.saveFeedback(1, { plot: 5 }); assert.equal(currentFeedback(h.ctx.chat[1]).plot, 5);
+});
+
+test('相同评价不重存、不重分析，修改保留 ID，每个内容版本只处理一次', async () => {
+    const h = host(); let calls = 0, saves = 0;
+    h.ctx.saveChat = async () => { saves++; };
+    const ctl = h.make(async () => { calls++; return result(currentFeedback(h.ctx.chat[1]).id); });
+    const original = { plot: 5, character: 3, note: '保持慢热' };
+    await ctl.saveFeedback(1, original); const id = currentFeedback(h.ctx.chat[1]).id;
+    await ctl.analyze(); const saved = saves;
+    await ctl.saveFeedback(1, original); assert.equal(saves, saved);
+    await assert.rejects(ctl.analyze(), /没有新的/); assert.equal(calls, 1);
+    await ctl.saveFeedback(1, { ...original, note: '关心更主动一点' });
+    assert.equal(currentFeedback(h.ctx.chat[1]).id, id);
+    assert.equal(h.ctx.injection.text, ''); // old conclusion cannot follow an edited rating
+    await ctl.analyze(); assert.equal(calls, 2);
+    await ctl.saveFeedback(1, original); await assert.rejects(ctl.analyze(), /没有新的/);
+    assert.equal(ctl.state().consumed.length, 2);
+});
+
+test('切回旧回复、删除后重加、撤销和清空不会让已处理评价重新进入队列', async () => {
+    const h = host(), ctl = h.make(async () => result(currentFeedback(h.ctx.chat[1]).id));
+    const input = { note: '保持慢热' }, reply = h.ctx.chat[1], oldText = reply.mes;
+    await ctl.saveFeedback(1, input); const id = currentFeedback(reply).id; await ctl.analyze();
+    reply.mes = '另一个回复'; reply.swipe_id = 1; ctl.refresh();
+    reply.mes = oldText; reply.swipe_id = 0; ctl.refresh();
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
+    await ctl.removeFeedback(1); await ctl.saveFeedback(1, input);
+    assert.equal(currentFeedback(reply).id, id); await assert.rejects(ctl.analyze(), /没有新的/);
+    await ctl.undo(); assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
+    await ctl.clearProfile(); assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
+});
+
+test('每轮只选近期 user 轮次里的最新新评价，旧评价不会计入当前批次', async () => {
+    const h = host(), ctl = h.make();
+    for (let i = 0; i < 4; i++) {
+        if (i) h.ctx.chat.push({ mes: `user ${i}`, is_user: true }, { mes: `char ${i}` });
+        await ctl.saveFeedback(i * 2 + 1, { note: `偏好 ${i}` });
+    }
+    const settings = { ...DEFAULTS, recentUserTurns: 2, feedbackBatchSize: 1 };
+    const first = analysisInput(h.ctx, ctl.state(), settings), payload = JSON.parse(first.prompt);
+    assert.equal(payload.feedback.length, 1); assert.equal(payload.feedback[0].index, 7);
+    assert.equal(first.pending.length, 1);
+    ctl.state().consumed.push(feedbackKey(first.pending[0]));
+    const next = analysisInput(h.ctx, ctl.state(), settings);
+    assert.equal(next.pending[0].index, 5);
+    ctl.state().consumed.push(feedbackKey(next.pending[0]));
+    assert.throws(() => analysisInput(h.ctx, ctl.state(), settings), /没有新的/);
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 2); // older, unseen evaluations remain auditable
+});
+
+test('增量分析携带上次完整结论，只发送新评价；保留旧来源的结论可以更新', async () => {
+    const h = host(); const payloads = [];
+    const ctl = h.make(async (ctx, settings, prompt) => {
+        const payload = JSON.parse(prompt); payloads.push(payload);
+        if (!payload.previousAnalysis) return result(payload.newFeedbackIds[0]);
+        const data = JSON.parse(result(payload.newFeedbackIds[0], 'repeated'));
+        data.items[0].sourceIds = [payload.previousAnalysis.items[0].sourceIds[0], payload.newFeedbackIds[0]];
+        return JSON.stringify(data);
+    });
+    await ctl.saveFeedback(1, { note: '保持克制' }); const oldId = currentFeedback(h.ctx.chat[1]).id;
+    await ctl.analyze();
+    h.ctx.chat.push({ is_user: true, mes: '下一轮' }, { mes: '下一轮角色回复' });
+    await ctl.saveFeedback(3, { note: '还喜欢克制的关心' }); await ctl.analyze();
+    const incremental = payloads[1];
+    assert.equal(incremental.feedback.length, 1); assert.notEqual(incremental.feedback[0].id, oldId);
+    assert.equal(incremental.previousAnalysis.summary, '用户喜欢克制的关心。');
+    assert.equal(incremental.previousAnalysis.items[0].sourceIds[0], oldId);
+    assert.equal(ctl.state().profile[0].sourceKeys.length, 2); assert.equal(ctl.state().consumed.length, 2);
+    assert.equal(ctl.state().lastAnalysis.newFeedbackKeys.length, 1);
+});
+
+test('旧版处理 ID 迁移不重复，编辑旧评价仍能产生一个新版本', async () => {
+    const h = host(), f = normalizeFeedback({ note: '旧偏好' });
+    h.ctx.chat[1].extra = { [KEY]: { versions: { [revisionOf(h.ctx.chat[1])]: f } } };
+    h.ctx.chatMetadata[KEY] = { ...newState(), version: 1, consumed: [f.id] };
+    const ctl = h.make();
+    assert.equal(ctl.state().version, 2); assert.equal(ctl.state().consumed[0], feedbackKey(f));
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
+    await ctl.saveFeedback(1, { note: '修改后的偏好' });
+    assert.equal(currentFeedback(h.ctx.chat[1]).id, f.id);
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 1);
+});
+
+test('三类说明完整才应用结果，没有相关证据可以保持空分类', async () => {
+    const h = host(), data = JSON.parse(result('f1'));
+    const parsed = parseResult(JSON.stringify(data), [{ id: 'f1', index: 1, note: '互动反馈' }]);
+    assert.equal(parsed.categoryReports.plot.status, 'insufficient');
+    assert.equal(parsed.items.filter(item => item.category === 'plot').length, 0);
+    delete data.categoryReports.expression;
+    assert.throws(() => parseResult(JSON.stringify(data), [{ id: 'f1', note: '互动反馈' }]), /三类/);
+});
+
+test('注入使用单一修正 XML 根节点，内容中的 XML 符号不会逃出包裹', async () => {
+    const h = host(), ctl = h.make();
+    await ctl.addItem('expression', '偏好 <短句> & 动作，也不要写 </修正>。');
+    assert.equal(h.ctx.injection.text.startsWith('<修正>\n'), true);
+    assert.equal(h.ctx.injection.text.endsWith('\n</修正>'), true);
+    assert.match(h.ctx.injection.text, /&lt;短句&gt; &amp;/);
+    assert.equal((h.ctx.injection.text.match(/<\/修正>/g) ?? []).length, 1);
 });

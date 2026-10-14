@@ -63,6 +63,8 @@
 .rpp-main-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: 8px; background: var(--rpp-inset); }
 .rpp-panel .rpp-main-tabs .rpp-main-tab, .rpp-floating-window .rpp-main-tabs .rpp-main-tab { background: transparent; border: 0; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; padding: 8px 4px; font-size: 12px; white-space: nowrap; }
 .rpp-panel .rpp-main-tabs .rpp-main-tab[aria-selected=true], .rpp-floating-window .rpp-main-tabs .rpp-main-tab[aria-selected=true] { background: var(--rpp-wash); font-weight: 600; }
+.rpp-panel .rpp-main-tabs .rpp-main-tab[aria-selected=false], .rpp-floating-window .rpp-main-tabs .rpp-main-tab[aria-selected=false] { background: transparent !important; box-shadow: none !important; font-weight: 400 !important; }
+.rpp-panel .rpp-main-tabs .rpp-main-tab.rpp-is-active, .rpp-floating-window .rpp-main-tabs .rpp-main-tab.rpp-is-active { background: var(--rpp-wash) !important; box-shadow: inset 0 -2px 0 var(--rpp-accent) !important; font-weight: 600 !important; }
 .rpp-step > .rpp-button { align-self: flex-start; }
 .rpp-page { min-width: 0; display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
 .rpp-record { padding: 12px 0; border-bottom: 1px solid var(--rpp-rule); font-size: 13px; }
@@ -78,6 +80,9 @@
 .rpp-category-tabs .rpp-button { min-width: 0; display: flex; flex-direction: column; gap: 4px; padding: 8px 4px; }
 .rpp-category-tabs small { font-size: 11px; font-weight: normal; }
 .rpp-category-tabs [aria-selected=true] { background: var(--rpp-wash); font-weight: 600; border-color: var(--rpp-accent); }
+.rpp-panel .rpp-category-tabs [aria-selected=false], .rpp-floating-window .rpp-category-tabs [aria-selected=false] { background: transparent !important; border-color: var(--rpp-rule) !important; font-weight: 400 !important; }
+.rpp-panel .rpp-category-tabs .rpp-is-active, .rpp-floating-window .rpp-category-tabs .rpp-is-active { background: var(--rpp-wash) !important; border-color: var(--rpp-accent) !important; font-weight: 600 !important; }
+.rpp-category-assessment { padding: 8px 10px; border-left: 2px solid var(--rpp-accent); background: var(--rpp-inset); font-size: 13px; }
 .rpp-category-info, .rpp-injection-info { margin: 8px 0 !important; font-size: 13px; }
 .rpp-empty { border: 1px dashed var(--rpp-border); border-radius: 8px; padding: 12px; font-size: 13px; }
 .rpp-floating-button { position: fixed; z-index: 30100; width: 56px; height: 56px; border-radius: 50%; border: 2px solid var(--rpp-accent); background: var(--SmartThemeBlurTintColor, #202126); box-shadow: 0 4px 16px #0003; font-weight: 600; cursor: pointer; touch-action: none; }

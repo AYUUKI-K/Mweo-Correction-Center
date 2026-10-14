@@ -1,4 +1,4 @@
-import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems } from './core.js';
+import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems, feedbackKey, sameFeedback, migrateState } from './core.js';
 import { callAnalyzer } from './api.js';
 
 export function createController({ getContext, isGenerating, notify = () => {}, changed = () => {}, analyzer = callAnalyzer }) {
@@ -6,7 +6,7 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
     const context = () => getContext();
     function supported(ctx) { return !ctx.groupId && ctx.characterId != null && ctx.characters?.[ctx.characterId] && (ctx.chatId || ctx.getCurrentChatId?.()); }
     function settings() { const ctx = context(); return ctx.extensionSettings[KEY] ??= { ...DEFAULTS }; }
-    function state(ctx = context()) { return ctx.chatMetadata[KEY] ??= newState(); }
+    function state(ctx = context()) { return migrateState(ctx.chat, ctx.chatMetadata[KEY] ??= newState()); }
     function key(ctx) { return `${ctx.characters?.[ctx.characterId]?.avatar ?? ctx.characterId}\0${ctx.chatId ?? ctx.getCurrentChatId?.() ?? ''}`; }
     function inject() {
         const ctx = context();
@@ -59,23 +59,36 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
     }
     async function saveFeedback(index, input) {
         const value = normalizeFeedback(input);
+        const before = context(); ensureWritable(before); state(before);
+        const messageBefore = before.chat[index];
+        const oldFeedback = messageBefore?.extra?.[KEY]?.versions?.[revisionOf(messageBefore)];
+        if (sameFeedback(oldFeedback, value)) { notify('评价内容没有变化，无需重复保存或分析。'); return; }
         await transact((ctx) => {
             const message = ctx.chat[index];
             if (!eligible(message)) throw new Error('这个楼层不是有效的角色回复。');
             const oldExtra = structuredClone(message.extra ?? {});
             message.extra ??= {};
             const store = message.extra[KEY] ??= { versions: {} };
+            const revision = revisionOf(message);
+            store.ids ??= {};
+            value.id = oldFeedback?.id ?? store.ids[revision] ?? value.id;
+            store.ids[revision] = value.id;
+            value.version = (oldFeedback?.version ?? 0) + 1;
             store.versions[revisionOf(message)] = value;
             return () => { message.extra = oldExtra; };
         }, '反馈已保存到当前存档。');
-        if (settings().enabled && settings().autoAnalyze && pendingFeedback(context().chat, state()).length >= settings().threshold) scheduleAuto();
+        if (settings().enabled && settings().autoAnalyze && pendingFeedback(context().chat, state(), settings()).length >= settings().threshold) scheduleAuto();
     }
     async function removeFeedback(index) {
         await transact(ctx => {
             const message = ctx.chat[index];
             if (!message) throw new Error('楼层已不存在。');
             const old = structuredClone(message.extra ?? {});
-            if (message.extra?.[KEY]?.versions) delete message.extra[KEY].versions[revisionOf(message)];
+            const store = message.extra?.[KEY], revision = revisionOf(message);
+            if (store?.versions?.[revision]) {
+                store.ids ??= {}; store.ids[revision] = store.versions[revision].id;
+                delete store.versions[revision];
+            }
             return () => { message.extra = old; };
         }, '当前回复版本的反馈已移除，相关补充不再注入。');
     }
@@ -85,7 +98,7 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         const originState = state(ctx), epoch = originState.epoch;
         const input = analysisInput(ctx, originState, settings());
         const originChat = ctx.chat, originMetadata = ctx.chatMetadata, originKey = key(ctx);
-        const pendingIds = input.pending.map(f => f.id);
+        const pendingKeys = input.pending.map(feedbackKey);
         const run = { abort: new AbortController(), cancelled: false };
         busy = true; task = run; changed();
         notify(automatic ? '正在分析累计反馈…' : '正在分析反馈与相关上下文…');
@@ -93,8 +106,8 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         try {
             const raw = await analyzer(ctx, { ...DEFAULTS, ...settings() }, input.prompt, { apiKey, signal: run.abort.signal });
             const current = context();
-            const activeIds = new Set(activeFeedback(current.chat).map(f => f.id));
-            if (run.cancelled || key(current) !== originKey || current.chat !== originChat || current.chatMetadata !== originMetadata || state(current) !== originState || originState.epoch !== epoch || input.evidence.some(f => !activeIds.has(f.id))) {
+            const activeKeys = new Set(activeFeedback(current.chat).map(feedbackKey));
+            if (run.cancelled || key(current) !== originKey || current.chat !== originChat || current.chatMetadata !== originMetadata || state(current) !== originState || originState.epoch !== epoch || input.evidence.some(f => !activeKeys.has(feedbackKey(f)))) {
                 notify('聊天或反馈已变化，本次结果未应用。反馈已保留，可以重新分析。'); return;
             }
             const result = parseResult(raw, input.evidence);
@@ -103,9 +116,11 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             const confirmed = originState.profile.filter(item => item.manual);
             const excluded = new Set([...(originState.dismissed ?? []), ...confirmed.map(item => `${item.category}\0${item.text}`)]);
             originState.profile = [...confirmed, ...result.items.filter(item => !excluded.has(`${item.category}\0${item.text}`)).slice(0, Math.max(0, 18 - confirmed.length))];
-            originState.consumed = [...new Set([...originState.consumed, ...pendingIds])].filter(id => activeIds.has(id));
+            originState.consumed = [...new Set([...originState.consumed, ...pendingKeys])];
             originState.summary = result.summary;
+            originState.categoryReports = result.categoryReports;
             originState.analyzedAt = new Date().toISOString(); originState.epoch++;
+            originState.lastAnalysis = { summary: result.summary, categoryReports: result.categoryReports, items: structuredClone(originState.profile), analyzedAt: originState.analyzedAt, newFeedbackKeys: pendingKeys };
             try {
                 if (await ctx.saveChat() === false) throw new Error('聊天存档保存失败。');
             } catch (error) { Object.assign(originState, previous); throw error; }
@@ -144,18 +159,22 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
     }
     async function undo() {
         if (!state().history.length) throw new Error('还没有可撤销的偏好更新。');
-        await transact((ctx, data) => { Object.assign(data, data.history.pop()); }, '已撤销上一次偏好更新。');
+        await transact((ctx, data) => {
+            const processed = data.consumed;
+            Object.assign(data, data.history.pop());
+            data.consumed = [...new Set([...processed, ...data.consumed])];
+        }, '已撤销上一次偏好更新，已处理的评价不会重复分析。');
     }
     async function setChatEnabled(value) { await transact((ctx, data) => { data.enabled = Boolean(value); }, value ? '当前存档补充已开启。' : '当前存档补充已暂停。'); }
     async function clearProfile() {
-        await transact((ctx, data) => { checkpoint(data); data.profile = []; data.consumed = []; data.dismissed = []; data.summary = ''; data.analyzedAt = ''; }, '偏好补充已清空，评分保留，可以撤销。');
+        await transact((ctx, data) => { checkpoint(data); data.profile = []; data.dismissed = []; data.summary = ''; data.analyzedAt = ''; data.lastAnalysis = null; data.categoryReports = {}; }, '偏好补充已清空，已处理评价不会重复分析，可以撤销。');
     }
     function scheduleAuto() {
         // Never await a generation inside an awaited host event callback.
         const expectedKey = key(context());
         setTimeout(() => {
             const ctx = context();
-            if (disposed || expectedKey !== key(ctx) || busy || generationIsActive(ctx) || !settings().enabled || !settings().autoAnalyze || !supported(ctx) || pendingFeedback(ctx.chat, state()).length < settings().threshold) return;
+            if (disposed || expectedKey !== key(ctx) || busy || generationIsActive(ctx) || !settings().enabled || !settings().autoAnalyze || !supported(ctx) || pendingFeedback(ctx.chat, state(), settings()).length < settings().threshold) return;
             analyze({ automatic: true }).catch(error => notify(error.message, true));
         }, 0);
     }

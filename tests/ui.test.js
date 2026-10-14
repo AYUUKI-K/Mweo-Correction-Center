@@ -22,7 +22,7 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
         async generateRaw({ prompt }) {
             calls++;
             const payload = JSON.parse(prompt);
-            return JSON.stringify({ summary: '<img src=x onerror=alert(1)> 只是文字', items: [{ category: 'plot', text: '放慢剧情推进', confidence: 'tentative', sourceIds: payload.newFeedbackIds }] });
+            return JSON.stringify({ summary: '<img src=x onerror=alert(1)> 只是文字', categoryReports: { interaction: { status: 'insufficient', reason: '未反馈角色相处。' }, plot: { status: 'updated', reason: '希望推进慢一点。' }, expression: { status: 'insufficient', reason: '未反馈表达细节。' } }, items: [{ category: 'plot', text: '放慢剧情推进', confidence: 'tentative', sourceIds: payload.newFeedbackIds }] });
         },
     };
     globalThis.SillyTavern = { getContext: () => ({ ...ctx }) };
@@ -39,6 +39,10 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     assert.equal(document.querySelector('#rpp-page-overview').hidden, false);
     assert.equal(document.querySelector('#rpp-page-settings').hidden, true);
     document.querySelector('#rpp-main-prompts').click(); assert.equal(document.querySelector('#rpp-page-prompts').hidden, false);
+    document.querySelector('#rpp-main-settings').click();
+    assert.equal(document.querySelector('#rpp-main-settings').classList.contains('rpp-is-active'), true);
+    assert.equal(document.querySelector('#rpp-main-overview').classList.contains('rpp-is-active'), false);
+    assert.equal(document.querySelectorAll('.rpp-main-tabs .rpp-is-active').length, 1);
     document.querySelector('#rpp-main-overview').click();
     assert.equal(document.querySelectorAll('.rpp-feedback').length, 1);
     const feedback = document.querySelector('.rpp-feedback'); feedback.open = true;
@@ -49,6 +53,8 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     assert.equal(calls, 0);
     findButton('分析并应用').click(); await tick();
     document.querySelector('#rpp-tab-plot').click();
+    assert.equal(document.querySelector('#rpp-tab-interaction').classList.contains('rpp-is-active'), false);
+    assert.equal(document.querySelector('#rpp-tab-plot').classList.contains('rpp-is-active'), true);
     assert.equal(calls, 1); assert.match(document.querySelector('.rpp-item-title').textContent, /待确认/);
     assert.equal(ctx.prompt, '');
     assert.equal(document.querySelectorAll('.rpp-analysis-summary img').length, 0);

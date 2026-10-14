@@ -1,10 +1,10 @@
-import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeedback, revisionOf, eligible, usableItems } from './core.js';
+import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeedback, revisionOf, eligible, usableItems, sourcesActive, feedbackKey, recentUserStart } from './core.js';
 import { createController } from './controller.js';
 import { callAnalyzer } from './api.js';
 
 let controller, panel, workbench, home, status, profileList, stats, preview, sessionApiKey = '', observer;
 let floatingButton, floatingWindow, floatingSelect, floatingFeedback, floatingChat, selectedMessage, followLatest = true, renderedMetadata;
-let categoryTabs, categoryInfo, analysisSummary, analysisSummaryDetails, injectionInfo, manualInput, manualDetails, activeCategory = 'interaction';
+let categoryTabs, categoryInfo, categoryAssessment, analysisSummary, analysisSummaryDetails, injectionInfo, manualInput, manualDetails, activeCategory = 'interaction';
 const CATEGORY_UI = {
     interaction: { title: '角色相处', description: '在人设允许的范围内，补充 char 与 user 的互动方式。也会显示在角色描述与开场白之间。' },
     plot: { title: '剧情走向', description: '剧情类型、冲突处理、关系发展与推进节奏。' },
@@ -44,6 +44,7 @@ function choosePage(name) {
     for (const [key, page] of Object.entries(pages)) page.hidden = key !== name;
     for (const tab of mainTabs?.querySelectorAll('[role=tab]') ?? []) {
         const selected = tab.dataset.page === name;
+        tab.classList.toggle('rpp-is-active', selected);
         tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
     }
 }
@@ -147,6 +148,8 @@ function mountPanel() {
     floatingFields.append(field('评价哪个角色回复', floatingSelect), floatingFeedback); feedbackSection.append(floatingFields);
     const floorHint = el('p', 'rpp-help', '楼层模式：在角色回复下展开“反馈”填写。'); floorHint.id = 'rpp-floor-hint'; feedbackSection.append(floorHint);
     pages.settings.append(entranceField, checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)), settingInput('自动分析：累计反馈条数', 'threshold', 'number', 1, 20));
+    pages.settings.append(settingInput('评价范围：最近 user 回复轮数', 'recentUserTurns', 'number', 1, 50), settingInput('每次最多处理的新评价数', 'feedbackBatchSize', 'number', 1, 40));
+    pages.settings.append(el('p', 'rpp-help', '只处理范围内的新评价。相同内容不会重复分析，旧结论会随新评价一起作为修正依据。'));
     const actions = el('div', 'rpp-actions');
     const analyze = button('分析并应用', () => controller.analyze({ apiKey: sessionApiKey }), true); analyze.dataset.mutation = 'true';
     const cancel = button('取消本次应用', () => { controller.cancel(); announce('已取消本次应用。酒馆当前 API 请求可能仍需等待结束。'); }); cancel.id = 'rpp-cancel';
@@ -174,13 +177,13 @@ function mountPanel() {
         categoryTabs.append(tab);
     }
     const categoryPanel = el('div', 'rpp-category-panel'); categoryPanel.id = 'rpp-category-panel'; categoryPanel.setAttribute('role', 'tabpanel');
-    categoryInfo = el('p', 'rpp-category-info'); profileList = el('div', 'rpp-profile-list');
+    categoryInfo = el('p', 'rpp-category-info'); categoryAssessment = el('p', 'rpp-category-assessment'); profileList = el('div', 'rpp-profile-list');
     manualDetails = el('details', 'rpp-manual'); manualDetails.append(el('summary', '', '手动添加偏好'));
     manualInput = el('textarea', 'text_pole'); manualInput.maxLength = 500; manualInput.rows = 3;
     manualInput.addEventListener('input', () => manualDrafts.set(activeCategory, manualInput.value));
     manualDetails.append(field('手动补充（保存后立即应用于当前存档）', manualInput));
     const add = button('保存手动补充', async () => { const category = activeCategory; await controller.addItem(category, manualInput.value); manualDrafts.delete(category); renderProfile(); }); add.dataset.mutation = 'true'; manualDetails.append(add);
-    categoryPanel.append(categoryInfo, profileList, manualDetails); profileSection.append(categoryTabs, categoryPanel);
+    categoryPanel.append(categoryInfo, categoryAssessment, profileList, manualDetails); profileSection.append(categoryTabs, categoryPanel);
     const historyActions = el('div', 'rpp-actions');
     for (const [label, action] of [['撤销上次更新', () => controller.undo()], ['清空补充', () => controller.clearProfile()]]) {
         const control = button(label, action); control.dataset.mutation = 'true'; historyActions.append(control);
@@ -215,6 +218,7 @@ function renderProfile() {
     manualInput.value = manualDrafts.get(activeCategory) ?? '';
     for (const tab of categoryTabs.querySelectorAll('[role=tab]')) {
         const selected = tab.dataset.category === activeCategory;
+        tab.classList.toggle('rpp-is-active', selected);
         tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
     }
     profileList.parentElement.setAttribute('aria-labelledby', `rpp-tab-${activeCategory}`);
@@ -226,15 +230,22 @@ function renderProfile() {
         recordsList.replaceChildren(el('p', 'rpp-empty', '打开单人存档后可查看反馈记录。'));
         workbench.querySelector('#rpp-chat-enabled').disabled = true;
         analysisSummaryDetails.hidden = true;
+        categoryAssessment.hidden = true;
         for (const tab of categoryTabs.querySelectorAll('[role=tab]')) tab.textContent = CATEGORY_UI[tab.dataset.category].title;
         return;
     }
     const state = controller.state(), valid = activeFeedback(ctx.chat), usable = usableItems(ctx.chat, state);
+    const processed = new Set(state.consumed), recentStart = recentUserStart(ctx.chat, controller.settings());
     recordsList.replaceChildren(...(valid.length ? [...valid].reverse().map(feedback => {
-        const row = el('article', 'rpp-record'); row.append(el('strong', '', `第 ${feedback.index} 层 · 剧情 ${feedback.plot ?? '—'} / 角色 ${feedback.character ?? '—'}`));
+        const label = processed.has(feedbackKey(feedback)) || processed.has(feedback.id) ? '已处理' : feedback.index < recentStart ? '超出近期范围' : '待分析';
+        const row = el('article', 'rpp-record'); row.append(el('strong', '', `第 ${feedback.index} 层 · 剧情 ${feedback.plot ?? '—'} / 角色 ${feedback.character ?? '—'} · ${label}`));
         row.append(el('p', '', feedback.note || '仅评分，无短评。')); return row;
     }) : [el('p', 'rpp-empty', '当前档还没有有效反馈记录。')]));
-    const pending = pendingFeedback(ctx.chat, state).length;
+    const pending = pendingFeedback(ctx.chat, state, controller.settings()).length;
+    const report = state.categoryReports?.[activeCategory];
+    categoryAssessment.hidden = !state.analyzedAt;
+    const reportLabels = { updated: '本轮已更新', unchanged: '保留上次结论', insufficient: '本轮证据不足' };
+    categoryAssessment.textContent = report ? `${reportLabels[report.status]}：${report.reason}` : '旧版分析未记录这类偏好的判断说明；下次有新评价时会补齐。';
     const name = el('p', 'rpp-chat-label', `${ctx.characters[ctx.characterId].name} · 当前存档`);
     const saveName = el('p', 'rpp-save-name', String(ctx.chatId ?? ctx.getCurrentChatId()));
     const counts = el('div', 'rpp-counts');
@@ -252,10 +263,9 @@ function renderProfile() {
     }
     const content = [];
     if (!state.profile.some(item => item.category === activeCategory)) content.push(el('p', 'rpp-empty', `还没有${CATEGORY_UI[activeCategory].title}补充。分析后会归入这里，也可以手动添加。`));
-    const activeIds = new Set(valid.map(f => f.id));
     for (const item of state.profile.filter(item => item.category === activeCategory)) {
         const row = el('article', 'rpp-item');
-        const stale = !item.manual && item.sourceIds.some(id => !activeIds.has(id));
+        const stale = !sourcesActive(item, ctx.chat);
         const confidence = { explicit: '明确反馈', repeated: '多次支持', tentative: '待确认推测', manual: '用户确认' }[item.confidence];
         row.append(el('p', 'rpp-item-title', `${stale ? '已失效' : item.enabled ? '已启用' : item.confidence === 'tentative' ? '待确认' : '已停用'} · ${confidence}${stale ? ' · 来源回复已变化' : ''}`));
         const input = el('textarea', 'text_pole'); input.rows = 3; input.maxLength = 500;
@@ -279,6 +289,7 @@ function createFeedbackRow(message, index, chat) {
     const revision = revisionOf(message), feedback = currentFeedback(message);
     const details = el('details', 'rpp-feedback'); details.dataset.revision = revision;
     details.dataset.feedback = feedback?.id ?? ''; details.dataset.index = index;
+    details.dataset.feedbackKey = feedback ? feedbackKey(feedback) : '';
     details.append(el('summary', '', feedback ? `反馈已保存 · 剧情 ${feedback.plot ?? '—'} / 角色 ${feedback.character ?? '—'}` : '反馈 · 剧情与角色表现'));
     const form = el('form', 'rpp-feedback-form');
     const stored = feedbackDrafts.get(message);
@@ -300,7 +311,7 @@ function createFeedbackRow(message, index, chat) {
     async function submit(apply) {
         try {
             checkVersion(); await controller.saveFeedback(index, draft); feedbackDrafts.delete(message);
-            if (apply && pendingFeedback(controller.context().chat, controller.state()).length) await controller.analyze({ apiKey: sessionApiKey });
+            if (apply && pendingFeedback(controller.context().chat, controller.state(), controller.settings()).length) await controller.analyze({ apiKey: sessionApiKey });
         } catch (error) { localStatus.textContent = error.message; localStatus.classList.add('rpp-error'); announce(error.message, true); }
     }
     const actions = el('div', 'rpp-actions');
@@ -397,7 +408,7 @@ function renderFloatingFeedback() {
     const index = ctx.chat.indexOf(selectedMessage), revision = revisionOf(selectedMessage), feedback = currentFeedback(selectedMessage);
     const old = floatingFeedback.querySelector('.rpp-feedback');
     const binding = old && floorBindings.get(old);
-    if (!old || binding?.chat !== ctx.chat || binding?.message !== selectedMessage || old.dataset.revision !== revision || old.dataset.feedback !== (feedback?.id ?? '') || old.dataset.index !== String(index)) {
+    if (!old || binding?.chat !== ctx.chat || binding?.message !== selectedMessage || old.dataset.revision !== revision || old.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || old.dataset.index !== String(index)) {
         const row = createFeedbackRow(selectedMessage, index, ctx.chat); row.open = true;
         floorBindings.set(row, { chat: ctx.chat, message: selectedMessage }); floatingFeedback.replaceChildren(row);
     }
@@ -440,7 +451,7 @@ function renderFloors() {
         if (!active || !eligible(message)) { existing?.remove(); continue; }
         const revision = revisionOf(message), feedback = currentFeedback(message);
         const binding = existing && floorBindings.get(existing);
-        if (!existing || binding?.chat !== ctx.chat || binding?.message !== message || existing.dataset.revision !== revision || existing.dataset.feedback !== (feedback?.id ?? '') || existing.dataset.index !== String(index)) {
+        if (!existing || binding?.chat !== ctx.chat || binding?.message !== message || existing.dataset.revision !== revision || existing.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || existing.dataset.index !== String(index)) {
             const open = existing?.open ?? false;
             const next = createFeedbackRow(message, index, ctx.chat); next.open = open;
             floorBindings.set(next, { chat: ctx.chat, message });
