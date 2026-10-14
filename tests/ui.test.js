@@ -29,6 +29,10 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     function drawChat() { document.querySelector('#chat').innerHTML = ctx.chat.map((m, index) => `<div class="mes" mesid="${index}"><div class="mes_block"></div></div>`).join(''); }
     const tick = () => new Promise(resolve => setTimeout(resolve, 15));
     const findButton = text => [...document.querySelectorAll('button')].find(node => node.textContent === text);
+    let hostTabClicks = 0;
+    document.addEventListener('click', event => {
+        if (event.target.closest('[role=tab]')) { hostTabClicks++; document.querySelector('#rpp-main-overview').classList.add('rpp-is-active'); }
+    });
     drawChat();
     const module = await import('../index.js');
     await tick();
@@ -43,6 +47,19 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     assert.equal(document.querySelector('#rpp-main-settings').classList.contains('rpp-is-active'), true);
     assert.equal(document.querySelector('#rpp-main-overview').classList.contains('rpp-is-active'), false);
     assert.equal(document.querySelectorAll('.rpp-main-tabs .rpp-is-active').length, 1);
+    assert.equal(hostTabClicks, 0);
+    assert.equal(document.querySelector('#rpp-main-settings').classList.contains('menu_button'), false);
+    assert.equal(document.querySelector('#rpp-main-settings').style.getPropertyPriority('background'), 'important');
+    assert.equal(document.querySelector('#rpp-main-overview').style.background, 'transparent');
+    assert.equal(document.querySelector('#rpp-main-overview').style.boxShadow, 'none');
+    assert.equal(document.querySelector('#rpp-automatic-options').hidden, true);
+    assert.equal(document.querySelector('.rpp-reading-options').open, false);
+    const auto = [...document.querySelectorAll('label')].find(label => label.textContent === '累计反馈后自动分析').querySelector('input');
+    auto.checked = true; auto.dispatchEvent(new window.Event('change'));
+    assert.equal(document.querySelector('#rpp-automatic-options').hidden, false);
+    auto.checked = false; auto.dispatchEvent(new window.Event('change'));
+    assert.equal(document.querySelector('#rpp-automatic-options').hidden, true);
+    assert.equal([...document.querySelectorAll('label')].some(label => label.textContent.includes('每次最多处理')), false);
     document.querySelector('#rpp-main-overview').click();
     assert.equal(document.querySelectorAll('.rpp-feedback').length, 1);
     const feedback = document.querySelector('.rpp-feedback'); feedback.open = true;
@@ -116,5 +133,6 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     assert.equal(document.querySelector('#rpp-character-supplement'), null);
     assert.equal(document.querySelector('#rpp-floating-button'), null);
     module.onEnable(); await tick(); assert.equal(document.querySelectorAll('#rpp-panel').length, 1);
+    assert.equal(document.querySelectorAll('.rpp-main-tabs .rpp-is-active').length, 1);
     module.onDisable(); dom.window.close();
 });

@@ -4,9 +4,12 @@
   "js": "index.js",
   "css": "style.css",
   "author": "AYUUKI-K",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "homePage": "https://github.com/AYUUKI-K/Mweo-Correction-Center",
   "auto_update": false,
   "minimum_client_version": "1.12.11",
-  "hooks": { "disable": "onDisable", "enable": "onEnable" }
+  "hooks": {
+    "disable": "onDisable",
+    "enable": "onEnable"
+  }
 }

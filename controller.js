@@ -92,11 +92,11 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             return () => { message.extra = old; };
         }, '当前回复版本的反馈已移除，相关补充不再注入。');
     }
-    async function analyze({ apiKey = '', automatic = false } = {}) {
+    async function analyze({ apiKey = '', automatic = false, feedbackIds } = {}) {
         const ctx = context(); ensureWritable(ctx);
         if (!settings().enabled) throw new Error('请先启用喵喵修正中心。');
         const originState = state(ctx), epoch = originState.epoch;
-        const input = analysisInput(ctx, originState, settings());
+        const input = analysisInput(ctx, originState, settings(), { automatic, feedbackIds });
         const originChat = ctx.chat, originMetadata = ctx.chatMetadata, originKey = key(ctx);
         const pendingKeys = input.pending.map(feedbackKey);
         const run = { abort: new AbortController(), cancelled: false };

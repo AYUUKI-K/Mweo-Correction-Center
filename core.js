@@ -1,6 +1,6 @@
 export const KEY = 'rp_preferences';
 export const CATEGORIES = { interaction: '互动偏好', plot: '剧情偏好', expression: '表达偏好' };
-export const DEFAULTS = Object.freeze({ enabled: true, feedbackMode: 'floors', autoAnalyze: false, threshold: 3, contextWindow: 12, recentUserTurns: 12, feedbackBatchSize: 10, depth: 2, apiMode: 'main', endpoint: '', model: '' });
+export const DEFAULTS = Object.freeze({ enabled: true, feedbackMode: 'floors', autoAnalyze: false, threshold: 3, contextWindow: 12, recentUserTurns: 12, depth: 2, apiMode: 'main', endpoint: '', model: '' });
 export const uid = () => globalThis.crypto.randomUUID();
 
 export function newState() {
@@ -109,16 +109,24 @@ feedback 只包含本轮尚未处理的新评价。previousAnalysis 是上次结
 {"summary":"简短分析说明，含不确定性或人设冲突","categoryReports":{"interaction":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"},"plot":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"},"expression":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"}},"items":[{"category":"interaction|plot|expression","text":"可执行的简短补充","confidence":"explicit|repeated|tentative","sourceIds":["反馈 id"]}]}
 items 最多 18 条，每类最多 6 条，每条最多 500 字；sourceIds 只能使用新反馈 id 或 previousAnalysis.items 中已有的有效来源 id。没有可靠偏好可以返回空数组。`;
 
-export function analysisInput(context, state, settings) {
+export function analysisInput(context, state, settings, { automatic = false, feedbackIds } = {}) {
     const all = activeFeedback(context.chat);
-    const pending = pendingFeedback(context.chat, state, settings).slice(-Math.min(40, Math.max(1, Number(settings.feedbackBatchSize) || DEFAULTS.feedbackBatchSize)));
+    // An explicit floor action analyzes that feedback even outside the bulk range.
+    let pending = pendingFeedback(context.chat, state, feedbackIds ? undefined : settings);
+    if (feedbackIds) pending = pending.filter(f => feedbackIds.includes(f.id));
+    // One automatic trigger is one batch of N; there is no second batch limit.
+    if (automatic) {
+        const count = Math.min(20, Math.max(1, Number(settings.threshold) || DEFAULTS.threshold));
+        if (pending.length < count) throw new Error(`尚未累计 ${count} 条新评价。`);
+        pending = pending.slice(-count);
+    }
     if (!pending.length) throw new Error('当前没有新的有效反馈。可以修改评分或短评后再次分析。');
     const proof = sourceProof(context.chat);
     const previousItems = state.profile.filter(item => !item.manual && sourcesActive(item, context.chat, proof));
     const relevantIds = new Set([...pending.map(f => f.id), ...previousItems.flatMap(item => item.sourceIds)]);
     const evidence = all.filter(f => relevantIds.has(f.id));
     const indices = new Set();
-    const start = recentUserStart(context.chat, settings);
+    const start = feedbackIds ? Math.min(recentUserStart(context.chat, settings), ...pending.map(f => Math.max(0, f.index - 2))) : recentUserStart(context.chat, settings);
     for (const feedback of pending) for (let i = Math.max(start, feedback.index - 2); i <= Math.min(context.chat.length - 1, feedback.index + 1); i++) indices.add(i);
     for (let i = Math.max(start, context.chat.length - settings.contextWindow); i < context.chat.length; i++) indices.add(i);
     const transcript = [...indices].sort((a, b) => a - b).map(index => {
@@ -136,7 +144,7 @@ export function analysisInput(context, state, settings) {
     } : null;
     const payload = { character, feedback: pending.map(f => ({ ...f, analysisKey: feedbackKey(f) })), newFeedbackIds: pending.map(f => f.id), previousAnalysis, confirmedPreferences: state.profile.filter(item => item.manual), currentPreferences: previousItems, transcript };
     const prompt = JSON.stringify(payload);
-    if (prompt.length > 90000) throw new Error('分析内容过长。请调低“最近上下文楼层数”或减少待分析反馈。');
+    if (prompt.length > 90000) throw new Error('分析内容过长。请缩小“批量评价范围”或“参考聊天消息数”，也可以在楼层逐条保存并分析。');
     return { prompt, pending, evidence };
 }
 

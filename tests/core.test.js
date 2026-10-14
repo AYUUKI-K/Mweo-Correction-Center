@@ -173,6 +173,26 @@ test('自动分析累计阈值只触发一次；删掉的同文字偏好不会�
     ctl.settings().autoAnalyze = false;
 });
 
+test('自动分析积压仍只处理 N 条，楼层手动分析不会顺带消耗其他评价', async () => {
+    const h = host(), payloads = [];
+    const ctl = h.make(async (ctx, settings, prompt) => {
+        const payload = JSON.parse(prompt); payloads.push(payload);
+        return result(payload.newFeedbackIds[0]);
+    });
+    for (let i = 0; i < 5; i++) {
+        if (i) h.ctx.chat.push({ mes: `user ${i}`, is_user: true }, { mes: `char ${i}` });
+        await ctl.saveFeedback(i * 2 + 1, { note: '希望更克制' });
+    }
+    ctl.settings().threshold = 3; ctl.settings().feedbackBatchSize = 1;
+    await ctl.analyze({ automatic: true });
+    assert.deepEqual(payloads[0].feedback.map(f => f.index), [5, 7, 9]);
+    assert.equal(ctl.state().consumed.length, 3);
+    const target = currentFeedback(h.ctx.chat[1]).id;
+    await ctl.analyze({ feedbackIds: [target] });
+    assert.deepEqual(payloads[1].newFeedbackIds, [target]);
+    assert.deepEqual(pendingFeedback(h.ctx.chat, ctl.state()).map(f => f.index), [3]);
+});
+
 test('手动角色相处补充仅写当前档，可撤销，角色描述及开场白不变', async () => {
     const h = host(); h.ctx.characters[0].data.first_mes = '原开场白';
     const original = structuredClone(h.ctx.characters);
@@ -266,18 +286,23 @@ test('切回旧回复、删除后重加、撤销和清空不会让已处理评�
     await ctl.clearProfile(); assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
 });
 
-test('每轮只选近期 user 轮次里的最新新评价，旧评价不会计入当前批次', async () => {
+test('自动累计数就是批次大小，手动批量不再有第二个上限，指定楼层不受范围限制', async () => {
     const h = host(), ctl = h.make();
     for (let i = 0; i < 4; i++) {
         if (i) h.ctx.chat.push({ mes: `user ${i}`, is_user: true }, { mes: `char ${i}` });
         await ctl.saveFeedback(i * 2 + 1, { note: `偏好 ${i}` });
     }
-    const settings = { ...DEFAULTS, recentUserTurns: 2, feedbackBatchSize: 1 };
-    const first = analysisInput(h.ctx, ctl.state(), settings), payload = JSON.parse(first.prompt);
+    const settings = { ...DEFAULTS, recentUserTurns: 2, threshold: 1, feedbackBatchSize: 1 };
+    assert.equal(analysisInput(h.ctx, ctl.state(), settings).pending.length, 2); // ignore the old v0.4.0 cap
+    const targeted = analysisInput(h.ctx, ctl.state(), settings, { feedbackIds: [currentFeedback(h.ctx.chat[1]).id] });
+    assert.deepEqual(targeted.pending.map(f => f.index), [1]);
+    assert.equal(JSON.parse(targeted.prompt).transcript[0].text, '我有点冷。');
+    const first = analysisInput(h.ctx, ctl.state(), settings, { automatic: true }), payload = JSON.parse(first.prompt);
     assert.equal(payload.feedback.length, 1); assert.equal(payload.feedback[0].index, 7);
     assert.equal(first.pending.length, 1);
     ctl.state().consumed.push(feedbackKey(first.pending[0]));
-    const next = analysisInput(h.ctx, ctl.state(), settings);
+    assert.throws(() => analysisInput(h.ctx, ctl.state(), { ...settings, threshold: 2 }, { automatic: true }), /尚未累计/);
+    const next = analysisInput(h.ctx, ctl.state(), settings, { automatic: true });
     assert.equal(next.pending[0].index, 5);
     ctl.state().consumed.push(feedbackKey(next.pending[0]));
     assert.throws(() => analysisInput(h.ctx, ctl.state(), settings), /没有新的/);

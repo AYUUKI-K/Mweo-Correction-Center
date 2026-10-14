@@ -16,6 +16,7 @@
 .rpp-title::-webkit-details-marker { display: none; }
 .rpp-icon { width: 16px; height: 16px; flex: 0 0 auto; }
 .rpp-brand { display: inline-flex; align-items: center; gap: 6px; }
+.rpp-version { font-size: 10px; font-weight: 400; margin-left: 4px; opacity: .7; }
 .rpp-title .rpp-chevron { margin-left: auto; width: 18px; height: 18px; padding: 3px; border-radius: 50%; background: var(--rpp-text); color: var(--SmartThemeBlurTintColor, Canvas); }
 .rpp-drawer[open] .rpp-chevron { transform: rotate(180deg); }
 .rpp-panel summary, .rpp-feedback summary, .rpp-floating-window summary { cursor: pointer; min-height: 44px; align-content: center; }

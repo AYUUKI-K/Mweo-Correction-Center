@@ -19,6 +19,7 @@ let renderTimer;
 let fieldCounter = 0;
 let nativeHostState;
 let mainTabs, recordsList, activePage = 'overview';
+let automaticOptions, analysisModeHelp, bulkAnalysisHelp;
 const pages = {};
 const MAIN_TABS = { overview: ['概览', 'book'], settings: ['设置', 'sliders'], prompts: ['提示词', 'pen'], records: ['记录', 'archive'] };
 
@@ -44,9 +45,26 @@ function choosePage(name) {
     for (const [key, page] of Object.entries(pages)) page.hidden = key !== name;
     for (const tab of mainTabs?.querySelectorAll('[role=tab]') ?? []) {
         const selected = tab.dataset.page === name;
-        tab.classList.toggle('rpp-is-active', selected);
-        tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+        selectTab(tab, selected);
     }
+}
+
+function selectTab(tab, selected) {
+    tab.classList.toggle('rpp-is-active', selected);
+    tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+    // Theme CSS (including stale styles after extension updates) must not pin a
+    // visual selection to the first button. Synchronize appearance with state.
+    tab.style.setProperty('background', selected ? 'var(--rpp-wash)' : 'transparent', 'important');
+    tab.style.setProperty('box-shadow', selected ? 'inset 0 -2px 0 var(--rpp-accent)' : 'none', 'important');
+    tab.style.setProperty('font-weight', selected ? '600' : '400', 'important');
+    tab.style.setProperty('border-color', selected ? 'var(--rpp-accent)' : 'var(--rpp-rule)', 'important');
+}
+
+function navigationTab(action) {
+    // Navigation is not a host menu_button; do not invoke host/theme handlers.
+    const tab = el('button', 'rpp-button'); tab.type = 'button';
+    tab.addEventListener('click', event => { event.stopPropagation(); action(); });
+    return tab;
 }
 
 function el(tag, className, text) {
@@ -107,7 +125,7 @@ function mountPanel() {
     panel = el('section', 'rpp-panel'); panel.id = 'rpp-panel';
     const drawer = el('details', 'rpp-drawer');
     const title = el('summary', 'rpp-title'); const chevron = icon('chevron'); chevron.classList.add('rpp-chevron');
-    title.append(icon('cat'), el('b', '', '喵喵修正中心'), chevron); drawer.append(title);
+    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', 'v0.4.1'), chevron); drawer.append(title);
     const body = el('div', 'rpp-body');
     const entrance = select([['floors', '楼层反馈'], ['floating', '悬浮球']], controller.settings().feedbackMode);
     entrance.addEventListener('change', () => saveSetting('feedbackMode', entrance.value));
@@ -119,7 +137,7 @@ function mountPanel() {
     topline.append(el('p', 'rpp-tagline', '听见偏好，让故事更合心意。'), master); workbench.append(topline);
     mainTabs = el('div', 'rpp-main-tabs'); mainTabs.setAttribute('role', 'tablist'); mainTabs.setAttribute('aria-label', '喵喵修正中心');
     for (const [key, [label, glyph]] of Object.entries(MAIN_TABS)) {
-        const tab = button('', () => choosePage(key)); tab.classList.add('rpp-main-tab'); tab.id = `rpp-main-${key}`; tab.dataset.page = key;
+        const tab = navigationTab(() => choosePage(key)); tab.classList.add('rpp-main-tab'); tab.id = `rpp-main-${key}`; tab.dataset.page = key;
         tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `rpp-page-${key}`); tab.append(icon(glyph), el('span', '', label));
         tab.addEventListener('keydown', event => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -147,9 +165,11 @@ function mountPanel() {
     floatingFeedback = el('div', 'rpp-floating-feedback');
     floatingFields.append(field('评价哪个角色回复', floatingSelect), floatingFeedback); feedbackSection.append(floatingFields);
     const floorHint = el('p', 'rpp-help', '楼层模式：在角色回复下展开“反馈”填写。'); floorHint.id = 'rpp-floor-hint'; feedbackSection.append(floorHint);
-    pages.settings.append(entranceField, checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)), settingInput('自动分析：累计反馈条数', 'threshold', 'number', 1, 20));
-    pages.settings.append(settingInput('评价范围：最近 user 回复轮数', 'recentUserTurns', 'number', 1, 50), settingInput('每次最多处理的新评价数', 'feedbackBatchSize', 'number', 1, 40));
-    pages.settings.append(el('p', 'rpp-help', '只处理范围内的新评价。相同内容不会重复分析，旧结论会随新评价一起作为修正依据。'));
+    automaticOptions = el('div', 'rpp-automatic-options'); automaticOptions.id = 'rpp-automatic-options';
+    automaticOptions.append(settingInput('每累计多少条新评价自动分析', 'threshold', 'number', 1, 20));
+    automaticOptions.append(el('p', 'rpp-help', '累计 N 条就分析最近 N 条新评价，不另设处理上限。相同评价不会重复计数。'));
+    analysisModeHelp = el('p', 'rpp-help');
+    pages.settings.append(entranceField, checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)), automaticOptions, analysisModeHelp);
     const actions = el('div', 'rpp-actions');
     const analyze = button('分析并应用', () => controller.analyze({ apiKey: sessionApiKey }), true); analyze.dataset.mutation = 'true';
     const cancel = button('取消本次应用', () => { controller.cancel(); announce('已取消本次应用。酒馆当前 API 请求可能仍需等待结束。'); }); cancel.id = 'rpp-cancel';
@@ -159,13 +179,14 @@ function mountPanel() {
     analysisSummary = el('p', 'rpp-analysis-summary'); analysisSummaryDetails.append(analysisSummary); pages.records.append(analysisSummaryDetails);
     feedbackSection.append(button('查看偏好补充', () => choosePage('prompts')));
     pages.overview.append(feedbackSection);
+    bulkAnalysisHelp = el('p', 'rpp-help'); feedbackSection.append(bulkAnalysisHelp);
     const profileSection = el('section', 'rpp-step'); profileSection.id = 'rpp-profile-step'; profileSection.append(el('h3', 'rpp-step-title', '当前档偏好补充'));
     profileSection.append(el('p', 'rpp-help', '一次分析整理三类偏好。待确认条目保存启用后才会注入。'));
     const chatSwitch = checkbox('应用当前存档的偏好补充', true, value => perform(() => controller.setChatEnabled(value)));
     chatSwitch.querySelector('input').id = 'rpp-chat-enabled'; profileSection.append(chatSwitch);
     categoryTabs = el('div', 'rpp-category-tabs'); categoryTabs.setAttribute('role', 'tablist'); categoryTabs.setAttribute('aria-label', '三类偏好');
     for (const [key, info] of Object.entries(CATEGORY_UI)) {
-        const tab = button(info.title, () => { activeCategory = key; renderProfile(); });
+        const tab = navigationTab(() => { activeCategory = key; renderProfile(); }); tab.textContent = info.title;
         tab.setAttribute('role', 'tab'); tab.id = `rpp-tab-${key}`; tab.dataset.category = key;
         tab.setAttribute('aria-controls', 'rpp-category-panel');
         tab.addEventListener('keydown', event => {
@@ -195,7 +216,11 @@ function mountPanel() {
     const injectionDetails = el('details', 'rpp-section'); injectionDetails.append(el('summary', '', '查看实际注入的提示词'));
     preview = el('textarea', 'text_pole rpp-preview'); preview.readOnly = true; preview.rows = 7; preview.setAttribute('aria-label', '当前实际注入的提示词'); injectionDetails.append(preview); settingsSection.append(injectionDetails);
     const config = el('div', 'rpp-section'); config.append(el('h3', 'rpp-step-title', '分析 API'));
-    config.append(settingInput('分析：最近上下文楼层数', 'contextWindow', 'number', 2, 50));
+    const reading = el('details', 'rpp-reading-options'); reading.append(el('summary', '', '分析范围与参考文本（可选）'));
+    reading.append(settingInput('批量评价范围：最近多少轮 user 对话', 'recentUserTurns', 'number', 1, 50));
+    reading.append(el('p', 'rpp-help', '用于自动分析和概览的“分析并应用”。楼层的“保存并分析”只处理该条评价，不受此范围限制。'));
+    reading.append(settingInput('参考聊天消息数（不是评价条数）', 'contextWindow', 'number', 2, 50));
+    reading.append(el('p', 'rpp-help', '这是 AI 阅读的最近聊天文本量，包含 user 和 char 消息；还会附上被评价回复附近的文本。不会增加累计条数，也不会重复分析旧评价。'));
     settingsSection.append(settingInput('注入深度（距聊天末尾的消息条数）', 'depth', 'number', 0, 20));
     const mode = select([['main', '酒馆当前 API'], ['custom', '独立兼容 API']], controller.settings().apiMode);
     const custom = el('div', 'rpp-custom');
@@ -208,7 +233,7 @@ function mountPanel() {
     key.addEventListener('input', () => { sessionApiKey = key.value; controller.cancel(); }); custom.append(field('API 密钥（可选）', key));
     custom.append(el('p', 'rpp-help', '独立 API 需支持浏览器跨域。密钥不会写入聊天、设置或导出文件，刷新后需重新填写。'));
     config.append(custom, el('p', 'rpp-help', '分析会发送原角色设定、有效反馈及相关聊天片段到所选 API。使用当前 API 时继承酒馆模型和回复长度；若 JSON 被截断，请提高回复长度。'));
-    pages.settings.append(config); pages.prompts.append(settingsSection);
+    pages.settings.append(config, reading); pages.prompts.append(settingsSection);
     choosePage(activePage);
     drawer.append(body); panel.append(drawer); target.append(panel); return true;
 }
@@ -218,8 +243,7 @@ function renderProfile() {
     manualInput.value = manualDrafts.get(activeCategory) ?? '';
     for (const tab of categoryTabs.querySelectorAll('[role=tab]')) {
         const selected = tab.dataset.category === activeCategory;
-        tab.classList.toggle('rpp-is-active', selected);
-        tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+        selectTab(tab, selected);
     }
     profileList.parentElement.setAttribute('aria-labelledby', `rpp-tab-${activeCategory}`);
     categoryInfo.textContent = CATEGORY_UI[activeCategory].description;
@@ -311,7 +335,8 @@ function createFeedbackRow(message, index, chat) {
     async function submit(apply) {
         try {
             checkVersion(); await controller.saveFeedback(index, draft); feedbackDrafts.delete(message);
-            if (apply && pendingFeedback(controller.context().chat, controller.state(), controller.settings()).length) await controller.analyze({ apiKey: sessionApiKey });
+            const saved = currentFeedback(message);
+            if (apply && saved && pendingFeedback(chat, controller.state()).some(f => f.id === saved.id)) await controller.analyze({ apiKey: sessionApiKey, feedbackIds: [saved.id] });
         } catch (error) { localStatus.textContent = error.message; localStatus.classList.add('rpp-error'); announce(error.message, true); }
     }
     const actions = el('div', 'rpp-actions');
@@ -362,7 +387,7 @@ function mountFloating() {
     floatingWindow = el('section', 'rpp-floating-window'); floatingWindow.id = 'rpp-floating-window'; floatingWindow.hidden = true;
     floatingWindow.setAttribute('role', 'dialog'); floatingWindow.setAttribute('aria-modal', 'false'); floatingWindow.setAttribute('aria-label', '喵喵修正中心');
     const header = el('div', 'rpp-floating-header');
-    const toolbar = el('div', 'rpp-floating-toolbar'); const heading = el('strong', 'rpp-brand'); heading.append(icon('cat'), document.createTextNode('喵喵修正中心')); toolbar.append(heading, button('关闭', () => closeFloating()));
+    const toolbar = el('div', 'rpp-floating-toolbar'); const heading = el('strong', 'rpp-brand'); heading.append(icon('cat'), document.createTextNode('喵喵修正中心'), el('small', 'rpp-version', 'v0.4.1')); toolbar.append(heading, button('关闭', () => closeFloating()));
     header.append(toolbar); floatingWindow.append(header);
     floatingWindow.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeFloating(); } });
     // Pointer drag changes only entry position; it does not modify or cancel analysis.
@@ -470,6 +495,11 @@ function render() {
         announce(controller.busy ? '已切换存档，上一次分析不会跨档应用。' : '当前存档已就绪。');
     }
     mountFloating();
+    const settings = controller.settings();
+    automaticOptions.hidden = !settings.autoAnalyze;
+    analysisModeHelp.textContent = settings.autoAnalyze ? `自动：每累计 ${settings.threshold} 条新评价分析一次。“保存并分析”仍可直接分析当前这一条。` : '手动模式：保存反馈只记录；保存并分析直接分析这一条，不用累计。';
+    bulkAnalysisHelp.textContent = `“分析并应用”批量处理最近 ${settings.recentUserTurns} 轮 user 对话内所有未处理评价。每次分析都携带旧结论，供 AI 修正。`;
+    choosePage(activePage);
     const floating = controller.settings().feedbackMode === 'floating';
     floatingButton.hidden = !controller.settings().enabled || !floating;
     if (floatingButton.hidden) closeFloating(false);
@@ -491,6 +521,7 @@ export function initialize() {
     }, notify: announce, changed: render,
         analyzer: (ctx, settings, prompt, options) => callAnalyzer(ctx, settings, prompt, { ...options, apiKey: options.apiKey || sessionApiKey }) });
     Object.assign(controller.settings(), { ...DEFAULTS, ...controller.settings() });
+    delete controller.settings().feedbackBatchSize;
     const ctx = controller.context(), types = ctx.eventTypes ?? ctx.event_types;
     function on(name, handler) { if (types?.[name]) { ctx.eventSource.on(types[name], handler); subscriptions.push([types[name], handler]); } }
     on('APP_READY', deferRefresh);
