@@ -1,8 +1,8 @@
-import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint } from './core.js';
+import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems } from './core.js';
 import { callAnalyzer } from './api.js';
 
 export function createController({ getContext, notify = () => {}, changed = () => {}, analyzer = callAnalyzer }) {
-    let busy = false, task = null, generationActive = false, sessionKey = '';
+    let busy = false, task = null, generationActive = false, sessionKey = '', disposed = false;
     const context = () => getContext();
     function supported(ctx) { return !ctx.groupId && ctx.characterId != null && ctx.characters?.[ctx.characterId] && (ctx.chatId || ctx.getCurrentChatId?.()); }
     function settings() { const ctx = context(); return ctx.extensionSettings[KEY] ??= { ...DEFAULTS }; }
@@ -10,17 +10,20 @@ export function createController({ getContext, notify = () => {}, changed = () =
     function key(ctx) { return `${ctx.characters?.[ctx.characterId]?.avatar ?? ctx.characterId}\0${ctx.chatId ?? ctx.getCurrentChatId?.() ?? ''}`; }
     function inject() {
         const ctx = context();
-        const text = settings().enabled && supported(ctx) ? buildInjection(ctx.chat, state(ctx)) : '';
+        const text = !disposed && settings().enabled && supported(ctx) ? buildInjection(ctx.chat, state(ctx)) : '';
         ctx.setExtensionPrompt(KEY, text, 1, Number(settings().depth) || 0, false, 0);
         return text;
     }
     function refresh() {
+        if (disposed) return;
         const ctx = context(), nextKey = key(ctx);
         if (sessionKey !== nextKey) { cancel(); sessionKey = nextKey; }
         inject(); changed();
     }
     function cancel() { if (task) { task.cancelled = true; task.abort.abort(); } }
+    function dispose() { cancel(); disposed = true; inject(); }
     function ensureWritable(ctx) {
+        if (disposed) throw new Error('相处手记已停用。');
         if (!supported(ctx)) throw new Error('请先打开一个角色的单人聊天存档。');
         if (busy) throw new Error('分析或保存正在进行，请等待完成，或取消本次应用。');
         if (generationActive || ctx.streamingProcessor?.isStopped === false) throw new Error('请等待当前回复生成完成。');
@@ -96,7 +99,9 @@ export function createController({ getContext, notify = () => {}, changed = () =
             try {
                 if (await ctx.saveChat() === false) throw new Error('聊天存档保存失败。');
             } catch (error) { Object.assign(originState, previous); throw error; }
-            notify('分析完成：可靠偏好已应用，待确认推测保留为候选。');
+            const applied = originState.enabled ? usableItems(ctx.chat, originState).length : 0;
+            const candidates = originState.profile.filter(item => !item.enabled && item.confidence === 'tentative').length;
+            notify(`分析完成：当前应用 ${applied} 条补充，${candidates} 条待确认。${!applied && candidates ? '请在三类偏好中确认需要的条目。' : ''}`);
         } finally { clearTimeout(timer); if (task === run) task = null; busy = false; refresh(); }
     }
     async function editItem(id, text, enabled) {
@@ -118,6 +123,15 @@ export function createController({ getContext, notify = () => {}, changed = () =
             data.profile = data.profile.filter(item => item.id !== id);
         }, '补充已删除，可以撤销。');
     }
+    async function addItem(category, text) {
+        const trimmed = String(text).trim();
+        if (!Object.hasOwn(CATEGORIES, category) || !trimmed || trimmed.length > 500) throw new Error('请填写 1～500 字的偏好补充。');
+        await transact((ctx, data) => {
+            if (data.profile.length >= 18) throw new Error('当前补充已达 18 条，请先删除不需要的补充。');
+            checkpoint(data);
+            data.profile.push({ id: uid(), category, text: trimmed, enabled: true, manual: true, confidence: 'manual', sourceIds: [] });
+        }, '手动偏好已保存到当前存档。');
+    }
     async function undo() {
         if (!state().history.length) throw new Error('还没有可撤销的偏好更新。');
         await transact((ctx, data) => { Object.assign(data, data.history.pop()); }, '已撤销上一次偏好更新。');
@@ -131,11 +145,11 @@ export function createController({ getContext, notify = () => {}, changed = () =
         const expectedKey = key(context());
         setTimeout(() => {
             const ctx = context();
-            if (expectedKey !== key(ctx) || busy || generationActive || !settings().enabled || !settings().autoAnalyze || !supported(ctx) || pendingFeedback(ctx.chat, state()).length < settings().threshold) return;
+            if (disposed || expectedKey !== key(ctx) || busy || generationActive || !settings().enabled || !settings().autoAnalyze || !supported(ctx) || pendingFeedback(ctx.chat, state()).length < settings().threshold) return;
             analyze({ automatic: true }).catch(error => notify(error.message, true));
         }, 0);
     }
     function generationStarted() { generationActive = true; cancel(); inject(); }
     function generationEnded() { generationActive = false; refresh(); scheduleAuto(); }
-    return { context, settings, state, supported, inject, refresh, saveFeedback, removeFeedback, analyze, editItem, deleteItem, undo, clearProfile, setChatEnabled, cancel, scheduleAuto, generationStarted, generationEnded, get busy() { return busy; } };
+    return { context, settings, state, supported, inject, refresh, saveFeedback, removeFeedback, analyze, editItem, deleteItem, addItem, undo, clearProfile, setChatEnabled, cancel, dispose, scheduleAuto, generationStarted, generationEnded, get busy() { return busy; } };
 }

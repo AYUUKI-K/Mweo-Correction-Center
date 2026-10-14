@@ -1,6 +1,6 @@
 export const KEY = 'rp_preferences';
 export const CATEGORIES = { interaction: '互动偏好', plot: '剧情偏好', expression: '表达偏好' };
-export const DEFAULTS = Object.freeze({ enabled: true, autoAnalyze: false, threshold: 3, contextWindow: 12, depth: 2, apiMode: 'main', endpoint: '', model: '' });
+export const DEFAULTS = Object.freeze({ enabled: true, feedbackMode: 'floors', autoAnalyze: false, threshold: 3, contextWindow: 12, depth: 2, apiMode: 'main', endpoint: '', model: '' });
 export const uid = () => globalThis.crypto.randomUUID();
 
 export function newState() {

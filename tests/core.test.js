@@ -171,3 +171,27 @@ test('自动分析累计阈值只触发一次；删掉的同文字偏好不会�
     assert.equal(ctl.state().profile.length, 0);
     ctl.settings().autoAnalyze = false;
 });
+
+test('手动角色相处补充仅写当前档，可撤销，角色描述及开场白不变', async () => {
+    const h = host(); h.ctx.characters[0].data.first_mes = '原开场白';
+    const original = structuredClone(h.ctx.characters);
+    const ctl = h.make();
+    await ctl.addItem('interaction', '通过行动关心，保持慢热。');
+    assert.match(h.ctx.injection.text, /通过行动关心/);
+    assert.equal(ctl.state().profile[0].manual, true);
+    assert.deepEqual(h.ctx.characters, original);
+    await ctl.undo(); assert.equal(h.ctx.injection.text, '');
+    await assert.rejects(ctl.addItem('unknown', '无效'), /补充/);
+});
+
+test('停用插件后正在进行的分析不能重新恢复提示词注入', async () => {
+    const h = host(); let finish;
+    const ctl = h.make(() => new Promise(resolve => { finish = resolve; }));
+    await ctl.addItem('interaction', '用户确认的相处方式');
+    await ctl.saveFeedback(1, { note: '喜欢' });
+    const id = currentFeedback(h.ctx.chat[1]).id, pending = ctl.analyze();
+    ctl.dispose(); assert.equal(h.ctx.injection.text, '');
+    finish(result(id)); await pending;
+    assert.equal(h.ctx.injection.text, '');
+    await assert.rejects(ctl.addItem('plot', '不应保存'), /停用/);
+});
