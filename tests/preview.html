@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>相处手记 · 本地界面测试</title><link rel="stylesheet" href="/style.css">
+<style>
+*{box-sizing:border-box}body{margin:0;padding:20px;font:15px/1.6 system-ui;color:#ececf2;background:#202126;--SmartThemeBodyColor:#ececf2;--SmartThemeBorderColor:#777b88;--SmartThemeQuoteColor:#b5c9ff}
+main{max-width:820px;margin:auto}h1{font-size:22px;margin-bottom:4px}.subtitle{margin-top:0;color:inherit}button,input,textarea,select{font:inherit;color:inherit}button{cursor:pointer}.text_pole{background:#292b33;border:1px solid #777b88;border-radius:6px;padding:8px;width:100%}.menu_button{background:#383b48;border:1px solid #7d8290;border-radius:6px;padding:8px;width:min-content}.mes{padding:16px;border:1px solid #777b88;border-radius:10px;margin:12px 0}#fixture-controls{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}#fixture-controls button{width:auto;min-height:44px}body.light{background:#f6f4ef;color:#2b303c;--SmartThemeBodyColor:#2b303c;--SmartThemeBorderColor:#858895;--SmartThemeQuoteColor:#355c9a}.light .text_pole{background:#fff}.light .menu_button{background:#e7e9f1}#fixture-status{font-size:13px}#chat{margin:20px 0}
+</style>
+<main><h1>相处手记</h1><p class="subtitle">当前存档的互动、剧情与表达偏好</p><div id="fixture-controls"><button id="theme" class="menu_button">切换明暗主题</button><button id="swipe" class="menu_button">切换回复版本</button><button id="switch" class="menu_button">切换存档</button></div><p id="fixture-status">本地模拟宿主，无真实 API 请求。</p><div id="extensions_settings2"></div><div id="chat"></div></main>
+<script type="module">
+const handlers = new Map();
+const eventTypes = Object.fromEntries(['APP_READY','GENERATION_STARTED','GENERATION_ENDED','GENERATION_STOPPED','CHAT_CHANGED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SWIPED'].map(x=>[x,x]));
+const eventSource = {on(k,fn){handlers.set(k,[...(handlers.get(k)||[]),fn])},removeListener(k,fn){handlers.set(k,(handlers.get(k)||[]).filter(x=>x!==fn))},emit(k){for(const fn of handlers.get(k)||[])fn()}};
+const chats = [{id:'围巾与初雪',chat:[{mes:'外面好像下雪了。我出门时没带围巾。',is_user:true},{mes:'他停下翻书的动作，目光在窗外落了一瞬。\n\n“柜子第二层。”他说，又低下头去，“那条灰色的，你先拿着。”',swipe_id:0}],metadata:{}},{id:'旅途中的夜晚',chat:[{mes:'今晚我们在哪里落脚？',is_user:true},{mes:'“前面有间旅店。”他把地图收回衣袋，放慢脚步等你跟上。',swipe_id:0}],metadata:{}}];
+let selected=0,calls=0;
+const ctx = {characters:[{name:'沈砚',avatar:'fixture.png',data:{description:'安静、慢热，常通过行动表达关心。',personality:'克制，尊重他人的选择。'}}],characterId:0,groupId:null,chatId:chats[0].id,chat:chats[0].chat,chatMetadata:chats[0].metadata,extensionSettings:{},eventTypes,eventSource,
+saveSettingsDebounced(){},async saveChat(){},setExtensionPrompt(k,text){window.injectedPrompt=text},
+async generateRaw({prompt}){calls++;document.querySelector('#fixture-status').textContent='本地模拟分析 '+calls+' 次，无真实 API 请求。';await new Promise(r=>setTimeout(r,500));const p=JSON.parse(prompt);return JSON.stringify({summary:'示例分析：用户喜欢克制的关心，希望关系推进更自然。单次评分支持的细节保留为候选。',items:[{category:'interaction',text:'通过细微行动表达关心，保持原角色克制的表达习惯。',confidence:p.feedback.some(f=>f.note)?'explicit':'tentative',sourceIds:p.newFeedbackIds},{category:'plot',text:'放缓关系升级，保留试探与用户回应的空间。',confidence:'tentative',sourceIds:p.newFeedbackIds}]})}};
+window.SillyTavern={getContext:()=>({...ctx})};
+function draw(){const chat=document.querySelector('#chat');chat.replaceChildren(...ctx.chat.map((m,i)=>{const floor=document.createElement('div');floor.className='mes';floor.setAttribute('mesid',i);const block=document.createElement('div');block.className='mes_block';const title=document.createElement('b');title.textContent=m.is_user?'你':'沈砚';const content=document.createElement('p');content.style.whiteSpace='pre-wrap';content.textContent=m.mes;block.append(title,content);floor.append(block);return floor}))}
+document.querySelector('#theme').onclick=()=>document.body.classList.toggle('light');
+document.querySelector('#swipe').onclick=()=>{const m=ctx.chat[1];m.swipe_id=m.swipe_id===0?1:0;m.mes=m.swipe_id===0?'他将围巾放在你身旁，没有多说。':'他走到柜子前，拿出围巾递给你。“天冷，别忘了。”';draw();eventSource.emit('MESSAGE_SWIPED')};
+document.querySelector('#switch').onclick=()=>{selected=1-selected;const save=chats[selected];Object.assign(ctx,{chatId:save.id,chat:save.chat,chatMetadata:save.metadata});draw();eventSource.emit('CHAT_CHANGED')};
+draw();await import('/index.js');document.querySelector('.rpp-drawer').open=true;document.querySelector('.rpp-feedback').open=true;
+</script></html>

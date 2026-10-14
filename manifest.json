@@ -1,0 +1,12 @@
+{
+  "display_name": "相处手记 · RP 偏好",
+  "loading_order": 100,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "AYUUKI-K",
+  "version": "0.1.0",
+  "homePage": "https://github.com/AYUUKI-K/Tavern-RP-Preferences",
+  "auto_update": false,
+  "minimum_client_version": "1.12.11",
+  "hooks": { "disable": "onDisable", "enable": "onEnable" }
+}
