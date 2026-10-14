@@ -1,7 +1,7 @@
 import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems } from './core.js';
 import { callAnalyzer } from './api.js';
 
-export function createController({ getContext, notify = () => {}, changed = () => {}, analyzer = callAnalyzer }) {
+export function createController({ getContext, isGenerating, notify = () => {}, changed = () => {}, analyzer = callAnalyzer }) {
     let busy = false, task = null, generationActive = false, sessionKey = '', disposed = false;
     const context = () => getContext();
     function supported(ctx) { return !ctx.groupId && ctx.characterId != null && ctx.characters?.[ctx.characterId] && (ctx.chatId || ctx.getCurrentChatId?.()); }
@@ -22,11 +22,21 @@ export function createController({ getContext, notify = () => {}, changed = () =
     }
     function cancel() { if (task) { task.cancelled = true; task.abort.abort(); } }
     function dispose() { cancel(); disposed = true; inject(); }
+    function generationIsActive(ctx = context()) {
+        // Live host flags override event latches left by aborted/preflight generations.
+        const live = typeof ctx.isGenerating === 'function' ? ctx.isGenerating() : isGenerating?.(ctx);
+        if (typeof live === 'boolean') return live;
+        const stream = ctx.streamingProcessor;
+        // isStopped means user cancellation, NOT normal completion.
+        if (stream?.isFinished === true || stream?.isStopped === true) return false;
+        if (stream?.isStopped === false && stream?.isFinished === false) return true;
+        return generationActive;
+    }
     function ensureWritable(ctx) {
-        if (disposed) throw new Error('相处手记已停用。');
+        if (disposed) throw new Error('喵喵修正中心已停用。');
         if (!supported(ctx)) throw new Error('请先打开一个角色的单人聊天存档。');
         if (busy) throw new Error('分析或保存正在进行，请等待完成，或取消本次应用。');
-        if (generationActive || ctx.streamingProcessor?.isStopped === false) throw new Error('请等待当前回复生成完成。');
+        if (generationIsActive(ctx)) throw new Error('请等待当前回复生成完成。');
         if (typeof ctx.saveChat !== 'function') throw new Error('酒馆缺少聊天保存接口，请更新酒馆。');
     }
     async function transact(change, success) {
@@ -71,7 +81,7 @@ export function createController({ getContext, notify = () => {}, changed = () =
     }
     async function analyze({ apiKey = '', automatic = false } = {}) {
         const ctx = context(); ensureWritable(ctx);
-        if (!settings().enabled) throw new Error('请先启用相处手记。');
+        if (!settings().enabled) throw new Error('请先启用喵喵修正中心。');
         const originState = state(ctx), epoch = originState.epoch;
         const input = analysisInput(ctx, originState, settings());
         const originChat = ctx.chat, originMetadata = ctx.chatMetadata, originKey = key(ctx);
@@ -145,11 +155,14 @@ export function createController({ getContext, notify = () => {}, changed = () =
         const expectedKey = key(context());
         setTimeout(() => {
             const ctx = context();
-            if (disposed || expectedKey !== key(ctx) || busy || generationActive || !settings().enabled || !settings().autoAnalyze || !supported(ctx) || pendingFeedback(ctx.chat, state()).length < settings().threshold) return;
+            if (disposed || expectedKey !== key(ctx) || busy || generationIsActive(ctx) || !settings().enabled || !settings().autoAnalyze || !supported(ctx) || pendingFeedback(ctx.chat, state()).length < settings().threshold) return;
             analyze({ automatic: true }).catch(error => notify(error.message, true));
         }, 0);
     }
-    function generationStarted() { generationActive = true; cancel(); inject(); }
+    function generationStarted(type, options, dryRun = false) {
+        if (dryRun) return;
+        generationActive = true; cancel(); inject();
+    }
     function generationEnded() { generationActive = false; refresh(); scheduleAuto(); }
     return { context, settings, state, supported, inject, refresh, saveFeedback, removeFeedback, analyze, editItem, deleteItem, addItem, undo, clearProfile, setChatEnabled, cancel, dispose, scheduleAuto, generationStarted, generationEnded, get busy() { return busy; } };
 }

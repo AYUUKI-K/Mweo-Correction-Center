@@ -195,3 +195,42 @@ test('停用插件后正在进行的分析不能重新恢复提示词注入', as
     assert.equal(h.ctx.injection.text, '');
     await assert.rejects(ctl.addItem('plot', '不应保存'), /停用/);
 });
+
+test('正常结束的流式回复保持 isStopped=false 时仍可保存反馈及分析', async () => {
+    const h = host(), ctl = h.make(async () => result(currentFeedback(h.ctx.chat[1]).id));
+    h.ctx.streamingProcessor = { isStopped: false, isFinished: true };
+    ctl.generationStarted(); // even an unmatched old start cannot override terminal stream state
+    await ctl.saveFeedback(1, { plot: 5, character: 3, note: '希望少一点黏人' });
+    assert.equal(currentFeedback(h.ctx.chat[1]).character, 3);
+    await ctl.analyze(); assert.equal(ctl.state().profile.length, 1);
+});
+
+test('dry-run 不锁定保存，不取消正在进行的偏好分析', async () => {
+    const h = host(); let finish;
+    const ctl = h.make(() => new Promise(resolve => { finish = resolve; }));
+    ctl.generationStarted('normal', {}, true);
+    await ctl.saveFeedback(1, { note: '喜欢' });
+    const id = currentFeedback(h.ctx.chat[1]).id, pending = ctl.analyze();
+    ctl.generationStarted('normal', {}, true);
+    finish(result(id)); await pending;
+    assert.equal(ctl.state().profile.length, 1);
+});
+
+test('真实生成仍阻止保存和分析；live host 空闲信号解除遗留事件锁', async () => {
+    const h = host(); let generating = false;
+    const ctl = createController({ getContext: () => h.ctx, isGenerating: () => generating });
+    await ctl.saveFeedback(1, { note: '喜欢' });
+    generating = true; ctl.generationStarted();
+    await assert.rejects(ctl.saveFeedback(1, { plot: 5 }), /生成完成/);
+    await assert.rejects(ctl.analyze(), /生成完成/);
+    generating = false; // early aborted generation has no GENERATION_ENDED
+    await ctl.saveFeedback(1, { plot: 5 }); assert.equal(currentFeedback(h.ctx.chat[1]).plot, 5);
+});
+
+test('加载插件时流仍在输出，缺少 host live 接口也不能提前保存', async () => {
+    const h = host(), ctl = h.make();
+    h.ctx.streamingProcessor = { isStopped: false, isFinished: false };
+    await assert.rejects(ctl.saveFeedback(1, { plot: 5 }), /生成完成/);
+    h.ctx.streamingProcessor.isFinished = true;
+    await ctl.saveFeedback(1, { plot: 5 }); assert.equal(currentFeedback(h.ctx.chat[1]).plot, 5);
+});

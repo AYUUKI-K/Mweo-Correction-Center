@@ -17,6 +17,7 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     const ctx = {
         characters: [{ name: '角色', avatar: 'test.png', data: { personality: '慢热' } }], characterId: 0, chatId: 'a',
         chat: [{ mes: '用户', is_user: true }, { mes: '回复' }], chatMetadata: {}, extensionSettings: {}, eventSource, eventTypes,
+        streamingProcessor: { isStopped: false, isFinished: true },
         async saveChat() {}, saveSettingsDebounced() {}, setExtensionPrompt(key, text) { ctx.prompt = text; },
         async generateRaw({ prompt }) {
             calls++;
@@ -33,7 +34,12 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     await tick();
     assert.equal(document.querySelector('#rpp-character-supplement').previousElementSibling.id, 'descriptionWrapper');
     assert.equal(document.querySelector('#rpp-character-supplement').nextElementSibling.id, 'firstMessageWrapper');
-    assert.equal(document.querySelectorAll('[role=tab]').length, 3);
+    assert.equal(document.querySelectorAll('.rpp-main-tabs [role=tab]').length, 4);
+    assert.equal(document.querySelectorAll('.rpp-category-tabs [role=tab]').length, 3);
+    assert.equal(document.querySelector('#rpp-page-overview').hidden, false);
+    assert.equal(document.querySelector('#rpp-page-settings').hidden, true);
+    document.querySelector('#rpp-main-prompts').click(); assert.equal(document.querySelector('#rpp-page-prompts').hidden, false);
+    document.querySelector('#rpp-main-overview').click();
     assert.equal(document.querySelectorAll('.rpp-feedback').length, 1);
     const feedback = document.querySelector('.rpp-feedback'); feedback.open = true;
     const rating = feedback.querySelector('select'); rating.value = '4'; rating.dispatchEvent(new window.Event('change'));
@@ -70,11 +76,12 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     ctx.chat[1].mes = '重生成回复'; eventSource.emit('MESSAGE_SWIPED'); await tick();
     assert.doesNotMatch(document.querySelector('.rpp-feedback summary').textContent, /已保存/);
     assert.equal(document.querySelector('.rpp-feedback textarea').value, '');
-    const entrance = document.querySelector('select').parentElement.querySelector('select');
+    const entrance = document.querySelector('#rpp-page-settings select');
     entrance.value = 'floating'; entrance.dispatchEvent(new window.Event('change')); await tick();
     assert.equal(document.querySelectorAll('#chat .rpp-feedback').length, 0);
     assert.equal(document.querySelector('#rpp-floating-button').hidden, false);
     document.querySelector('#rpp-floating-button').click();
+    document.querySelector('#rpp-main-overview').click();
     assert.equal(document.querySelector('#rpp-floating-window').hidden, false);
     assert.equal(document.querySelector('#rpp-floating-window .rpp-workbench') !== null, true);
     const floatNote = document.querySelector('.rpp-floating-feedback textarea'); floatNote.value = '悬浮球短评'; floatNote.dispatchEvent(new window.Event('input'));

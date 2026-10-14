@@ -5,6 +5,7 @@ const html = await readFile(new URL('./preview.html', import.meta.url));
 const allowed = new Set(['index.js', 'core.js', 'controller.js', 'api.js', 'style.css']);
 const server = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/script.js') { res.setHeader('Content-Type', 'text/javascript; charset=utf-8'); res.end('export const isGenerating = () => false;'); return; }
     if (pathname === '/') { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(html); return; }
     const file = pathname.slice(1);
     if (!allowed.has(file)) { res.writeHead(404); res.end(); return; }

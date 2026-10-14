@@ -17,6 +17,36 @@ const manualDrafts = new Map();
 const subscriptions = [];
 let renderTimer;
 let fieldCounter = 0;
+let nativeHostState;
+let mainTabs, recordsList, activePage = 'overview';
+const pages = {};
+const MAIN_TABS = { overview: ['概览', 'book'], settings: ['设置', 'sliders'], prompts: ['提示词', 'pen'], records: ['记录', 'archive'] };
+
+function icon(name) {
+    const shapes = {
+        book: ['M12 5c-3-2-7-2-9-1v14c3-1 6-1 9 1 3-2 6-2 9-1V4c-2-1-6-1-9 1Z', 'M12 5v14'],
+        sliders: ['M4 6h16M4 12h16M4 18h16', 'M8 3v6M16 9v6M10 15v6'],
+        pen: ['m4 16 11-11 4 4-11 11-5 1Z', 'm13 7 4 4'],
+        archive: ['M4 7h16v13H4ZM3 3h18v4H3Z', 'M9 11h6'],
+        cat: ['M5 8 4 3l6 3h4l6-3-1 5c4 8 0 13-7 13S1 16 5 8Z', 'M8 12h.1M16 12h.1M10 16l2 1 2-1M3 14l4 1M17 15l4-1'],
+        chevron: ['m6 9 6 6 6-6'],
+    };
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.6'); svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true'); svg.classList.add('rpp-icon');
+    for (const d of shapes[name] ?? []) { const path = document.createElementNS(svg.namespaceURI, 'path'); path.setAttribute('d', d); svg.append(path); }
+    return svg;
+}
+
+function choosePage(name) {
+    activePage = name;
+    for (const [key, page] of Object.entries(pages)) page.hidden = key !== name;
+    for (const tab of mainTabs?.querySelectorAll('[role=tab]') ?? []) {
+        const selected = tab.dataset.page === name;
+        tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+    }
+}
 
 function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -75,16 +105,37 @@ function mountPanel() {
     if (!target) return false;
     panel = el('section', 'rpp-panel'); panel.id = 'rpp-panel';
     const drawer = el('details', 'rpp-drawer');
-    drawer.append(el('summary', 'rpp-title', '相处手记 · RP 偏好'));
+    const title = el('summary', 'rpp-title'); const chevron = icon('chevron'); chevron.classList.add('rpp-chevron');
+    title.append(icon('cat'), el('b', '', '喵喵修正中心'), chevron); drawer.append(title);
     const body = el('div', 'rpp-body');
-    body.append(checkbox('启用相处手记', controller.settings().enabled, value => saveSetting('enabled', value)));
     const entrance = select([['floors', '楼层反馈'], ['floating', '悬浮球']], controller.settings().feedbackMode);
     entrance.addEventListener('change', () => saveSetting('feedbackMode', entrance.value));
-    body.append(field('反馈入口（二选一）', entrance));
+    const entranceField = field('反馈入口（二选一）', entrance);
     home = el('div', 'rpp-home'); workbench = el('div', 'rpp-workbench'); home.append(workbench); body.append(home);
-    stats = el('div', 'rpp-overview'); stats.setAttribute('aria-live', 'polite'); stats.setAttribute('aria-atomic', 'true'); workbench.append(stats);
-    const feedbackSection = el('section', 'rpp-step'); feedbackSection.id = 'rpp-feedback-step'; feedbackSection.append(el('h3', 'rpp-step-title', '1 · 反馈与分析'));
-    feedbackSection.append(el('p', 'rpp-help', '两个评分项：剧情满意度、角色表现满意度。也可以只写调整短评。'));
+    const topline = el('div', 'rpp-topline');
+    const master = checkbox('启用', controller.settings().enabled, value => saveSetting('enabled', value)); master.classList.add('rpp-switch');
+    const masterInput = master.querySelector('input'); master.replaceChildren(el('span', '', '启用'), masterInput, el('span', 'rpp-switch-track'));
+    topline.append(el('p', 'rpp-tagline', '听见偏好，让故事更合心意。'), master); workbench.append(topline);
+    mainTabs = el('div', 'rpp-main-tabs'); mainTabs.setAttribute('role', 'tablist'); mainTabs.setAttribute('aria-label', '喵喵修正中心');
+    for (const [key, [label, glyph]] of Object.entries(MAIN_TABS)) {
+        const tab = button('', () => choosePage(key)); tab.classList.add('rpp-main-tab'); tab.id = `rpp-main-${key}`; tab.dataset.page = key;
+        tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `rpp-page-${key}`); tab.append(icon(glyph), el('span', '', label));
+        tab.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault(); const keys = Object.keys(MAIN_TABS), index = keys.indexOf(activePage);
+            const next = event.key === 'Home' ? keys[0] : event.key === 'End' ? keys.at(-1) : keys[(index + (event.key === 'ArrowLeft' ? -1 : 1) + keys.length) % keys.length];
+            choosePage(next); document.querySelector(`#rpp-main-${next}`).focus();
+        });
+        mainTabs.append(tab);
+    }
+    workbench.append(mainTabs);
+    for (const key of Object.keys(MAIN_TABS)) {
+        const page = el('section', 'rpp-page'); page.id = `rpp-page-${key}`; page.setAttribute('role', 'tabpanel'); page.setAttribute('aria-labelledby', `rpp-main-${key}`);
+        pages[key] = page; workbench.append(page);
+    }
+    stats = el('div', 'rpp-overview'); stats.setAttribute('aria-live', 'polite'); stats.setAttribute('aria-atomic', 'true'); pages.overview.append(stats);
+    const feedbackSection = el('section', 'rpp-step'); feedbackSection.id = 'rpp-feedback-step'; feedbackSection.append(el('h3', 'rpp-step-title', '反馈与分析'));
+    feedbackSection.append(el('p', 'rpp-help', '剧情、角色表现分别评分，也可以只写短评。'));
     floatingSelect = select([], '');
     floatingSelect.addEventListener('change', () => {
         const chat = controller.context().chat;
@@ -95,18 +146,18 @@ function mountPanel() {
     floatingFeedback = el('div', 'rpp-floating-feedback');
     floatingFields.append(field('评价哪个角色回复', floatingSelect), floatingFeedback); feedbackSection.append(floatingFields);
     const floorHint = el('p', 'rpp-help', '楼层模式：在角色回复下展开“反馈”填写。'); floorHint.id = 'rpp-floor-hint'; feedbackSection.append(floorHint);
-    feedbackSection.append(checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)));
-    feedbackSection.append(settingInput('自动分析：累计反馈条数', 'threshold', 'number', 1, 20));
+    pages.settings.append(entranceField, checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)), settingInput('自动分析：累计反馈条数', 'threshold', 'number', 1, 20));
     const actions = el('div', 'rpp-actions');
     const analyze = button('分析并应用', () => controller.analyze({ apiKey: sessionApiKey }), true); analyze.dataset.mutation = 'true';
     const cancel = button('取消本次应用', () => { controller.cancel(); announce('已取消本次应用。酒馆当前 API 请求可能仍需等待结束。'); }); cancel.id = 'rpp-cancel';
     actions.append(analyze, cancel); feedbackSection.append(actions);
-    status = el('p', 'rpp-status', '保存反馈后，一次分析会整理下方三类偏好。'); status.setAttribute('role', 'status'); feedbackSection.append(status);
+    status = el('p', 'rpp-status', '当前存档已就绪。'); status.setAttribute('role', 'status'); workbench.insertBefore(status, pages.overview);
     analysisSummaryDetails = el('details', 'rpp-analysis-details'); analysisSummaryDetails.append(el('summary', '', '查看本次分析说明'));
-    analysisSummary = el('p', 'rpp-analysis-summary'); analysisSummaryDetails.append(analysisSummary); feedbackSection.append(analysisSummaryDetails);
-    workbench.append(feedbackSection);
-    const profileSection = el('section', 'rpp-step'); profileSection.id = 'rpp-profile-step'; profileSection.append(el('h3', 'rpp-step-title', '2 · 三类偏好补充'));
-    profileSection.append(el('p', 'rpp-help', '一次分析，同时整理三类结果。待确认推测不会注入，确认并保存后才生效。'));
+    analysisSummary = el('p', 'rpp-analysis-summary'); analysisSummaryDetails.append(analysisSummary); pages.records.append(analysisSummaryDetails);
+    feedbackSection.append(button('查看偏好补充', () => choosePage('prompts')));
+    pages.overview.append(feedbackSection);
+    const profileSection = el('section', 'rpp-step'); profileSection.id = 'rpp-profile-step'; profileSection.append(el('h3', 'rpp-step-title', '当前档偏好补充'));
+    profileSection.append(el('p', 'rpp-help', '一次分析整理三类偏好。待确认条目保存启用后才会注入。'));
     const chatSwitch = checkbox('应用当前存档的偏好补充', true, value => perform(() => controller.setChatEnabled(value)));
     chatSwitch.querySelector('input').id = 'rpp-chat-enabled'; profileSection.append(chatSwitch);
     categoryTabs = el('div', 'rpp-category-tabs'); categoryTabs.setAttribute('role', 'tablist'); categoryTabs.setAttribute('aria-label', '三类偏好');
@@ -134,14 +185,15 @@ function mountPanel() {
     for (const [label, action] of [['撤销上次更新', () => controller.undo()], ['清空补充', () => controller.clearProfile()]]) {
         const control = button(label, action); control.dataset.mutation = 'true'; historyActions.append(control);
     }
-    profileSection.append(historyActions); workbench.append(profileSection);
-    const settingsSection = el('section', 'rpp-step'); settingsSection.id = 'rpp-settings-step'; settingsSection.append(el('h3', 'rpp-step-title', '3 · API 与提示词位置'));
+    recordsList = el('div', 'rpp-records'); pages.records.append(el('h3', 'rpp-step-title', '当前档反馈记录'), recordsList, historyActions);
+    pages.prompts.append(profileSection);
+    const settingsSection = el('section', 'rpp-step'); settingsSection.id = 'rpp-settings-step'; settingsSection.append(el('h3', 'rpp-step-title', '实际注入'));
     injectionInfo = el('p', 'rpp-injection-info'); settingsSection.append(injectionInfo);
     const injectionDetails = el('details', 'rpp-section'); injectionDetails.append(el('summary', '', '查看实际注入的提示词'));
     preview = el('textarea', 'text_pole rpp-preview'); preview.readOnly = true; preview.rows = 7; preview.setAttribute('aria-label', '当前实际注入的提示词'); injectionDetails.append(preview); settingsSection.append(injectionDetails);
-    const config = el('details', 'rpp-section'); config.append(el('summary', '', '修改 API 与分析设置'));
+    const config = el('div', 'rpp-section'); config.append(el('h3', 'rpp-step-title', '分析 API'));
     config.append(settingInput('分析：最近上下文楼层数', 'contextWindow', 'number', 2, 50));
-    config.append(settingInput('注入深度（距聊天末尾的消息条数）', 'depth', 'number', 0, 20));
+    settingsSection.append(settingInput('注入深度（距聊天末尾的消息条数）', 'depth', 'number', 0, 20));
     const mode = select([['main', '酒馆当前 API'], ['custom', '独立兼容 API']], controller.settings().apiMode);
     const custom = el('div', 'rpp-custom');
     mode.addEventListener('change', () => { saveSetting('apiMode', mode.value); custom.hidden = mode.value !== 'custom'; });
@@ -153,7 +205,8 @@ function mountPanel() {
     key.addEventListener('input', () => { sessionApiKey = key.value; controller.cancel(); }); custom.append(field('API 密钥（可选）', key));
     custom.append(el('p', 'rpp-help', '独立 API 需支持浏览器跨域。密钥不会写入聊天、设置或导出文件，刷新后需重新填写。'));
     config.append(custom, el('p', 'rpp-help', '分析会发送原角色设定、有效反馈及相关聊天片段到所选 API。使用当前 API 时继承酒馆模型和回复长度；若 JSON 被截断，请提高回复长度。'));
-    settingsSection.append(config); workbench.append(settingsSection);
+    pages.settings.append(config); pages.prompts.append(settingsSection);
+    choosePage(activePage);
     drawer.append(body); panel.append(drawer); target.append(panel); return true;
 }
 
@@ -170,12 +223,17 @@ function renderProfile() {
     if (!controller.supported(ctx)) {
         stats.textContent = '请打开角色的单人聊天。第一版暂不支持群聊。';
         profileList.replaceChildren(el('p', 'rpp-help', '打开聊天存档后，可在这里查看它的偏好。')); preview.value = '';
+        recordsList.replaceChildren(el('p', 'rpp-empty', '打开单人存档后可查看反馈记录。'));
         workbench.querySelector('#rpp-chat-enabled').disabled = true;
         analysisSummaryDetails.hidden = true;
         for (const tab of categoryTabs.querySelectorAll('[role=tab]')) tab.textContent = CATEGORY_UI[tab.dataset.category].title;
         return;
     }
     const state = controller.state(), valid = activeFeedback(ctx.chat), usable = usableItems(ctx.chat, state);
+    recordsList.replaceChildren(...(valid.length ? [...valid].reverse().map(feedback => {
+        const row = el('article', 'rpp-record'); row.append(el('strong', '', `第 ${feedback.index} 层 · 剧情 ${feedback.plot ?? '—'} / 角色 ${feedback.character ?? '—'}`));
+        row.append(el('p', '', feedback.note || '仅评分，无短评。')); return row;
+    }) : [el('p', 'rpp-empty', '当前档还没有有效反馈记录。')]));
     const pending = pendingFeedback(ctx.chat, state).length;
     const name = el('p', 'rpp-chat-label', `${ctx.characters[ctx.characterId].name} · 当前存档`);
     const saveName = el('p', 'rpp-save-name', String(ctx.chatId ?? ctx.getCurrentChatId()));
@@ -264,7 +322,7 @@ function closeFloating(restoreFocus = true) {
 }
 
 function openWorkbench(category) {
-    if (category) { activeCategory = category; renderProfile(); }
+    if (category) { activeCategory = category; choosePage('prompts'); renderProfile(); }
     if (controller.settings().feedbackMode === 'floating') {
         mountFloating(); floatingWindow.hidden = false; floatingWindow.append(workbench);
         floatingButton.setAttribute('aria-expanded', 'true');
@@ -285,18 +343,16 @@ function positionFloating() {
 
 function mountFloating() {
     if (floatingButton) return;
-    floatingButton = button('偏好', () => {
+    floatingButton = button('修正', () => {
         if (floatingWindow.hidden) openWorkbench(); else closeFloating();
     });
     floatingButton.className = 'rpp-floating-button'; floatingButton.id = 'rpp-floating-button';
-    floatingButton.setAttribute('aria-label', '打开相处手记偏好面板'); floatingButton.setAttribute('aria-expanded', 'false'); floatingButton.setAttribute('aria-controls', 'rpp-floating-window');
+    floatingButton.setAttribute('aria-label', '打开喵喵修正中心'); floatingButton.setAttribute('aria-expanded', 'false'); floatingButton.setAttribute('aria-controls', 'rpp-floating-window');
     floatingWindow = el('section', 'rpp-floating-window'); floatingWindow.id = 'rpp-floating-window'; floatingWindow.hidden = true;
-    floatingWindow.setAttribute('role', 'dialog'); floatingWindow.setAttribute('aria-modal', 'false'); floatingWindow.setAttribute('aria-label', '相处手记偏好面板');
+    floatingWindow.setAttribute('role', 'dialog'); floatingWindow.setAttribute('aria-modal', 'false'); floatingWindow.setAttribute('aria-label', '喵喵修正中心');
     const header = el('div', 'rpp-floating-header');
-    const toolbar = el('div', 'rpp-floating-toolbar'); toolbar.append(el('strong', '', '相处手记'), button('关闭', () => closeFloating()));
-    const navigation = el('nav', 'rpp-floating-nav'); navigation.setAttribute('aria-label', '偏好面板导航');
-    for (const [title, id] of [['反馈', 'rpp-feedback-step'], ['三类偏好', 'rpp-profile-step'], ['API / 注入', 'rpp-settings-step']]) navigation.append(button(title, () => document.getElementById(id)?.scrollIntoView?.({ block: 'start', behavior: 'auto' })));
-    header.append(toolbar, navigation); floatingWindow.append(header);
+    const toolbar = el('div', 'rpp-floating-toolbar'); const heading = el('strong', 'rpp-brand'); heading.append(icon('cat'), document.createTextNode('喵喵修正中心')); toolbar.append(heading, button('关闭', () => closeFloating()));
+    header.append(toolbar); floatingWindow.append(header);
     floatingWindow.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeFloating(); } });
     // Pointer drag changes only entry position; it does not modify or cancel analysis.
     let drag = null, suppressClick = false;
@@ -400,7 +456,7 @@ function render() {
     if (!panel && !mountPanel()) return;
     if (renderedMetadata !== controller.context().chatMetadata) {
         renderedMetadata = controller.context().chatMetadata; itemDrafts.clear(); manualDrafts.clear();
-        announce(controller.busy ? '已切换存档，上一次分析不会跨档应用。' : '已读取当前存档。保存反馈后，一次分析会整理三类偏好。');
+        announce(controller.busy ? '已切换存档，上一次分析不会跨档应用。' : '当前存档已就绪。');
     }
     mountFloating();
     const floating = controller.settings().feedbackMode === 'floating';
@@ -410,7 +466,7 @@ function render() {
     workbench.querySelector('#rpp-floor-hint').hidden = floating;
     renderProfile(); renderFloors(); renderCharacterSupplement();
     if (floating) renderFloatingFeedback(); else floatingFeedback.replaceChildren();
-    floatingButton.setAttribute('aria-label', '打开相处手记偏好面板');
+    floatingButton.setAttribute('aria-label', '打开喵喵修正中心');
     for (const control of workbench.querySelectorAll('[data-mutation]')) control.disabled = controller.busy || !controller.supported(controller.context());
     workbench.querySelector('#rpp-cancel').disabled = !controller.busy;
 }
@@ -418,13 +474,16 @@ function deferRefresh() { clearTimeout(renderTimer); renderTimer = setTimeout(()
 
 export function initialize() {
     if (controller || !globalThis.SillyTavern?.getContext) return;
-    controller = createController({ getContext: () => SillyTavern.getContext(), notify: announce, changed: render,
+    controller = createController({ getContext: () => SillyTavern.getContext(), isGenerating: () => {
+        if (typeof nativeHostState?.isGenerating === 'function') return nativeHostState.isGenerating();
+        return typeof nativeHostState?.is_send_press === 'boolean' ? nativeHostState.is_send_press : undefined;
+    }, notify: announce, changed: render,
         analyzer: (ctx, settings, prompt, options) => callAnalyzer(ctx, settings, prompt, { ...options, apiKey: options.apiKey || sessionApiKey }) });
     Object.assign(controller.settings(), { ...DEFAULTS, ...controller.settings() });
     const ctx = controller.context(), types = ctx.eventTypes ?? ctx.event_types;
     function on(name, handler) { if (types?.[name]) { ctx.eventSource.on(types[name], handler); subscriptions.push([types[name], handler]); } }
     on('APP_READY', deferRefresh);
-    on('GENERATION_STARTED', () => controller.generationStarted());
+    on('GENERATION_STARTED', (...args) => controller.generationStarted(...args));
     on('GENERATION_ENDED', () => controller.generationEnded());
     on('GENERATION_STOPPED', () => controller.generationEnded());
     for (const name of ['CHAT_CHANGED', 'CHAT_LOADED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_DELETED', 'MESSAGE_SWIPE_DELETED', 'CHARACTER_MESSAGE_RENDERED', 'MORE_MESSAGES_LOADED']) on(name, () => controller.refresh());
@@ -436,6 +495,8 @@ export function initialize() {
     });
     window.addEventListener('resize', positionFloating);
     observer.observe(document.body, { childList: true, subtree: true }); controller.refresh();
+    // Version adaptation: getContext is preferred; legacy hosts export the live flag here.
+    import('/script.js').then(module => { nativeHostState = module; }).catch(() => {});
 }
 
 export function onDisable() {
