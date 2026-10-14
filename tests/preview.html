@@ -7,6 +7,7 @@ main{max-width:1020px;margin:auto}h1{font-size:22px;margin-bottom:4px}.subtitle{
 </style>
 <!-- Deliberately hostile theme rule: visual state must still follow the selected tab. -->
 <style>.rpp-panel .rpp-main-tabs .rpp-main-tab:first-child{background:#d1d5db!important;box-shadow:inset 0 -2px #355c9a!important}</style>
+<style>.standoutHeader{background-image:linear-gradient(348deg,#ffffff30 2%,#77777730 10%,#00000070 95%,var(--SmartThemeQuoteColor) 100%);margin-bottom:5px;border-radius:10px;padding:2px 5px;border:1px solid var(--SmartThemeBorderColor)}#chat{height:460px;overflow-y:auto}.fixture-floor-number{display:block;font-size:12px;opacity:.7}#fixture-floor-info{font-size:12px}</style>
 <main><h1>喵喵修正中心</h1><p class="subtitle">当前存档的互动、剧情与表达偏好</p><div id="fixture-controls"><button id="theme" class="menu_button">切换明暗主题</button><button id="swipe" class="menu_button">切换回复版本</button><button id="switch" class="menu_button">切换存档</button></div><p id="fixture-status">本地模拟宿主，无真实 API 请求。</p><div class="fixture-grid"><section><div id="extensions_settings2"></div><div id="chat"></div></section><aside id="character-panel"><h2>沈砚 · 角色页</h2><div id="descriptionWrapper"><label for="description_textarea">角色描述</label><textarea class="text_pole" id="description_textarea" name="description" rows="6">安静、慢热，常通过行动表达关心。克制，尊重他人的选择。</textarea></div><div id="firstMessageWrapper"><div id="first_message_div"><label for="firstmessage_textarea">开场白</label></div><textarea class="text_pole" id="firstmessage_textarea" name="first_mes" rows="4">窗外飘起了初雪。他在窗边翻着书。</textarea></div><input type="hidden" id="avatar_url_pole" value="fixture.png"></aside></div></main>
 <script type="module">
 const handlers = new Map();
@@ -24,4 +25,16 @@ document.querySelector('#theme').onclick=()=>document.body.classList.toggle('lig
 document.querySelector('#swipe').onclick=()=>{const m=ctx.chat[1];m.swipe_id=m.swipe_id===0?1:0;m.mes=m.swipe_id===0?'他将围巾放在你身旁，没有多说。':'他走到柜子前，拿出围巾递给你。“天冷，别忘了。”';draw();eventSource.emit('MESSAGE_SWIPED')};
 document.querySelector('#switch').onclick=()=>{selected=1-selected;const save=chats[selected];Object.assign(ctx,{chatId:save.id,chat:save.chat,chatMetadata:save.metadata});draw();eventSource.emit('CHAT_CHANGED')};
 draw();await import('/index.js');document.querySelector('.rpp-drawer').open=true;document.querySelector('.rpp-feedback').open=true;
+// Exercise a long save with pagination: only floors 995..999 are mounted.
+const longSave=document.createElement('button');longSave.className='menu_button';longSave.textContent='浏览第 997 楼（共 999 楼）';
+document.querySelector('#fixture-controls').append(longSave);
+longSave.onclick=()=>{
+    ctx.chatId='长存档 · 第 997 楼';ctx.chatMetadata={};
+    ctx.chat=Array.from({length:1000},(_,i)=>({mes:i===997?'他把围巾放在你身旁，没有催促，仍旧低头翻着书。':`这是第 ${i} 楼的虚构${i%2?'角色回复':'用户消息'}。`,is_user:i%2===0,swipe_id:0}));
+    const area=document.querySelector('#chat');
+    area.replaceChildren(...ctx.chat.slice(995).map((m,j)=>{const floor=document.createElement('div');floor.className='mes';floor.setAttribute('mesid',j+995);floor.style.minHeight='350px';const block=document.createElement('div');block.className='mes_block';const label=document.createElement('b');label.className='fixture-floor-number';label.textContent=`第 ${j+995} 楼 · ${m.is_user?'你':'沈砚'}`;const content=document.createElement('p');content.textContent=m.mes;block.append(label,content);floor.append(block);return floor}));
+    eventSource.emit('CHAT_CHANGED');
+    document.querySelector('[name=rpp-feedback-mode][value=floating]').click();
+    area.scrollTop=document.querySelector('.mes[mesid="997"]').offsetTop-area.offsetTop;
+};
 </script></html>

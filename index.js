@@ -1,9 +1,10 @@
-import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeedback, revisionOf, eligible, usableItems, sourcesActive, feedbackKey, recentUserStart } from './core.js';
+import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeedback, revisionOf, eligible, usableItems, sourcesActive, feedbackKey } from './core.js';
 import { createController } from './controller.js';
 import { callAnalyzer } from './api.js';
 
 let controller, panel, workbench, home, status, profileList, stats, preview, sessionApiKey = '', observer;
-let floatingButton, floatingWindow, floatingSelect, floatingFeedback, floatingChat, selectedMessage, followLatest = true, renderedMetadata;
+let floatingButton, floatingWindow, floatingFeedback, floatingHeading, floatingPreview, floatingStatus, renderedMetadata, focusedFloor;
+let visibleFloorTimer;
 let categoryTabs, categoryInfo, categoryAssessment, analysisSummary, analysisSummaryDetails, injectionInfo, manualInput, manualDetails, activeCategory = 'interaction';
 const CATEGORY_UI = {
     interaction: { title: '角色相处', description: '在人设允许的范围内，补充 char 与 user 的互动方式。也会显示在角色描述与开场白之间。' },
@@ -83,6 +84,7 @@ async function perform(action) {
 }
 function announce(text, error = false) {
     if (status) { status.textContent = text; status.classList.toggle('rpp-error', error); }
+    if (floatingStatus) { floatingStatus.textContent = text; floatingStatus.classList.toggle('rpp-error', error); }
 }
 function field(labelText, input) {
     const wrapper = el('div', 'rpp-field');
@@ -124,12 +126,17 @@ function mountPanel() {
     if (!target) return false;
     panel = el('section', 'rpp-panel'); panel.id = 'rpp-panel';
     const drawer = el('details', 'rpp-drawer');
-    const title = el('summary', 'rpp-title'); const chevron = icon('chevron'); chevron.classList.add('rpp-chevron');
-    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', 'v0.4.1'), chevron); drawer.append(title);
+    const title = el('summary', 'rpp-title standoutHeader'); const chevron = icon('chevron'); chevron.classList.add('rpp-chevron');
+    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', 'v0.5.0'), chevron); drawer.append(title);
     const body = el('div', 'rpp-body');
-    const entrance = select([['floors', '楼层反馈'], ['floating', '悬浮球']], controller.settings().feedbackMode);
-    entrance.addEventListener('change', () => saveSetting('feedbackMode', entrance.value));
-    const entranceField = field('反馈入口（二选一）', entrance);
+    const entranceField = el('fieldset', 'rpp-entrance'); entranceField.append(el('legend', '', '反馈入口（二选一）'));
+    for (const [value, label] of [['floors', '楼层反馈'], ['floating', '悬浮球']]) {
+        const choice = el('label', 'rpp-entrance-choice');
+        const input = el('input'); input.type = 'radio'; input.name = 'rpp-feedback-mode'; input.value = value;
+        input.checked = controller.settings().feedbackMode === value;
+        input.addEventListener('change', () => { if (input.checked) saveSetting('feedbackMode', value); });
+        choice.append(input, document.createTextNode(label)); entranceField.append(choice);
+    }
     home = el('div', 'rpp-home'); workbench = el('div', 'rpp-workbench'); home.append(workbench); body.append(home);
     const topline = el('div', 'rpp-topline');
     const master = checkbox('启用', controller.settings().enabled, value => saveSetting('enabled', value)); master.classList.add('rpp-switch');
@@ -155,15 +162,6 @@ function mountPanel() {
     stats = el('div', 'rpp-overview'); stats.setAttribute('aria-live', 'polite'); stats.setAttribute('aria-atomic', 'true'); pages.overview.append(stats);
     const feedbackSection = el('section', 'rpp-step'); feedbackSection.id = 'rpp-feedback-step'; feedbackSection.append(el('h3', 'rpp-step-title', '反馈与分析'));
     feedbackSection.append(el('p', 'rpp-help', '剧情、角色表现分别评分，也可以只写短评。'));
-    floatingSelect = select([], '');
-    floatingSelect.addEventListener('change', () => {
-        const chat = controller.context().chat;
-        selectedMessage = chat[Number(floatingSelect.value)];
-        followLatest = selectedMessage === chat.filter(eligible).at(-1); renderFloatingFeedback();
-    });
-    const floatingFields = el('div', 'rpp-floating-fields'); floatingFields.id = 'rpp-floating-fields';
-    floatingFeedback = el('div', 'rpp-floating-feedback');
-    floatingFields.append(field('评价哪个角色回复', floatingSelect), floatingFeedback); feedbackSection.append(floatingFields);
     const floorHint = el('p', 'rpp-help', '楼层模式：在角色回复下展开“反馈”填写。'); floorHint.id = 'rpp-floor-hint'; feedbackSection.append(floorHint);
     automaticOptions = el('div', 'rpp-automatic-options'); automaticOptions.id = 'rpp-automatic-options';
     automaticOptions.append(settingInput('每累计多少条新评价自动分析', 'threshold', 'number', 1, 20));
@@ -216,24 +214,19 @@ function mountPanel() {
     const injectionDetails = el('details', 'rpp-section'); injectionDetails.append(el('summary', '', '查看实际注入的提示词'));
     preview = el('textarea', 'text_pole rpp-preview'); preview.readOnly = true; preview.rows = 7; preview.setAttribute('aria-label', '当前实际注入的提示词'); injectionDetails.append(preview); settingsSection.append(injectionDetails);
     const config = el('div', 'rpp-section'); config.append(el('h3', 'rpp-step-title', '分析 API'));
-    const reading = el('details', 'rpp-reading-options'); reading.append(el('summary', '', '分析范围与参考文本（可选）'));
-    reading.append(settingInput('批量评价范围：最近多少轮 user 对话', 'recentUserTurns', 'number', 1, 50));
-    reading.append(el('p', 'rpp-help', '用于自动分析和概览的“分析并应用”。楼层的“保存并分析”只处理该条评价，不受此范围限制。'));
-    reading.append(settingInput('参考聊天消息数（不是评价条数）', 'contextWindow', 'number', 2, 50));
-    reading.append(el('p', 'rpp-help', '这是 AI 阅读的最近聊天文本量，包含 user 和 char 消息；还会附上被评价回复附近的文本。不会增加累计条数，也不会重复分析旧评价。'));
     settingsSection.append(settingInput('注入深度（距聊天末尾的消息条数）', 'depth', 'number', 0, 20));
     const mode = select([['main', '酒馆当前 API'], ['custom', '独立兼容 API']], controller.settings().apiMode);
     const custom = el('div', 'rpp-custom');
     mode.addEventListener('change', () => { saveSetting('apiMode', mode.value); custom.hidden = mode.value !== 'custom'; });
-    config.append(field('分析 API', mode));
+    config.append(field('使用的接口', mode));
     custom.hidden = mode.value !== 'custom';
     custom.append(settingInput('API 基础地址（含 /v1，或完整 completions 地址）', 'endpoint'));
     custom.append(settingInput('模型名称', 'model'));
     const key = el('input', 'text_pole'); key.type = 'password'; key.autocomplete = 'off'; key.placeholder = '仅保留在本次页面内存';
     key.addEventListener('input', () => { sessionApiKey = key.value; controller.cancel(); }); custom.append(field('API 密钥（可选）', key));
     custom.append(el('p', 'rpp-help', '独立 API 需支持浏览器跨域。密钥不会写入聊天、设置或导出文件，刷新后需重新填写。'));
-    config.append(custom, el('p', 'rpp-help', '分析会发送原角色设定、有效反馈及相关聊天片段到所选 API。使用当前 API 时继承酒馆模型和回复长度；若 JSON 被截断，请提高回复长度。'));
-    pages.settings.append(config, reading); pages.prompts.append(settingsSection);
+    config.append(custom, el('p', 'rpp-help', '每条新评价只携带对应楼层正文，并附原角色设定及上次分析结论。使用当前 API 时继承酒馆模型和回复长度；若 JSON 被截断，请提高回复长度。'));
+    pages.settings.append(config); pages.prompts.append(settingsSection);
     choosePage(activePage);
     drawer.append(body); panel.append(drawer); target.append(panel); return true;
 }
@@ -259,9 +252,9 @@ function renderProfile() {
         return;
     }
     const state = controller.state(), valid = activeFeedback(ctx.chat), usable = usableItems(ctx.chat, state);
-    const processed = new Set(state.consumed), recentStart = recentUserStart(ctx.chat, controller.settings());
+    const processed = new Set(state.consumed);
     recordsList.replaceChildren(...(valid.length ? [...valid].reverse().map(feedback => {
-        const label = processed.has(feedbackKey(feedback)) || processed.has(feedback.id) ? '已处理' : feedback.index < recentStart ? '超出近期范围' : '待分析';
+        const label = processed.has(feedbackKey(feedback)) || processed.has(feedback.id) ? '已处理' : '待分析';
         const row = el('article', 'rpp-record'); row.append(el('strong', '', `第 ${feedback.index} 层 · 剧情 ${feedback.plot ?? '—'} / 角色 ${feedback.character ?? '—'} · ${label}`));
         row.append(el('p', '', feedback.note || '仅评分，无短评。')); return row;
     }) : [el('p', 'rpp-empty', '当前档还没有有效反馈记录。')]));
@@ -352,21 +345,20 @@ function createFeedbackRow(message, index, chat) {
 function closeFloating(restoreFocus = true) {
     if (!floatingWindow || floatingWindow.hidden) return;
     floatingWindow.hidden = true;
-    home?.append(workbench);
     floatingButton?.setAttribute('aria-expanded', 'false');
     if (restoreFocus && !floatingButton?.hidden) floatingButton.focus();
 }
 
 function openWorkbench(category) {
     if (category) { activeCategory = category; choosePage('prompts'); renderProfile(); }
-    if (controller.settings().feedbackMode === 'floating') {
-        mountFloating(); floatingWindow.hidden = false; floatingWindow.append(workbench);
-        floatingButton.setAttribute('aria-expanded', 'true');
-        floatingWindow.querySelector('button').focus();
-    } else {
-        panel.querySelector('.rpp-drawer').open = true;
-        workbench.scrollIntoView?.({ block: 'start', behavior: 'auto' });
-    }
+    panel.querySelector('.rpp-drawer').open = true;
+    workbench.scrollIntoView?.({ block: 'start', behavior: 'auto' });
+}
+
+function openFloating() {
+    mountFloating(); floatingWindow.hidden = false;
+    floatingButton.setAttribute('aria-expanded', 'true');
+    renderFloatingFeedback(); floatingWindow.querySelector('button').focus();
 }
 
 function positionFloating() {
@@ -380,15 +372,20 @@ function positionFloating() {
 function mountFloating() {
     if (floatingButton) return;
     floatingButton = button('修正', () => {
-        if (floatingWindow.hidden) openWorkbench(); else closeFloating();
+        if (floatingWindow.hidden) openFloating(); else closeFloating();
     });
     floatingButton.className = 'rpp-floating-button'; floatingButton.id = 'rpp-floating-button';
-    floatingButton.setAttribute('aria-label', '打开喵喵修正中心'); floatingButton.setAttribute('aria-expanded', 'false'); floatingButton.setAttribute('aria-controls', 'rpp-floating-window');
+    floatingButton.setAttribute('aria-label', '评价当前浏览楼层'); floatingButton.setAttribute('aria-expanded', 'false'); floatingButton.setAttribute('aria-controls', 'rpp-floating-window');
     floatingWindow = el('section', 'rpp-floating-window'); floatingWindow.id = 'rpp-floating-window'; floatingWindow.hidden = true;
-    floatingWindow.setAttribute('role', 'dialog'); floatingWindow.setAttribute('aria-modal', 'false'); floatingWindow.setAttribute('aria-label', '喵喵修正中心');
+    floatingWindow.setAttribute('role', 'dialog'); floatingWindow.setAttribute('aria-modal', 'false'); floatingWindow.setAttribute('aria-label', '当前楼层评价');
     const header = el('div', 'rpp-floating-header');
-    const toolbar = el('div', 'rpp-floating-toolbar'); const heading = el('strong', 'rpp-brand'); heading.append(icon('cat'), document.createTextNode('喵喵修正中心'), el('small', 'rpp-version', 'v0.4.1')); toolbar.append(heading, button('关闭', () => closeFloating()));
+    const toolbar = el('div', 'rpp-floating-toolbar'); floatingHeading = el('strong', 'rpp-brand', '当前楼层评价'); toolbar.append(floatingHeading, button('关闭', () => closeFloating()));
     header.append(toolbar); floatingWindow.append(header);
+    floatingPreview = el('p', 'rpp-floor-preview');
+    floatingFeedback = el('div', 'rpp-floating-feedback');
+    floatingStatus = el('p', 'rpp-status'); floatingStatus.setAttribute('role', 'status');
+    const cancel = button('取消本次分析', () => { controller.cancel(); announce('已取消本次分析应用。'); }); cancel.id = 'rpp-floating-cancel'; cancel.hidden = true;
+    floatingWindow.append(floatingPreview, floatingFeedback, floatingStatus, cancel);
     floatingWindow.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeFloating(); } });
     // Pointer drag changes only entry position; it does not modify or cancel analysis.
     let drag = null, suppressClick = false;
@@ -418,26 +415,55 @@ function mountFloating() {
     document.body.append(floatingButton, floatingWindow); positionFloating();
 }
 
+function visibleReply(ctx) {
+    const chatNode = document.querySelector('#chat');
+    if (!chatNode) return null;
+    const area = chatNode.getBoundingClientRect();
+    const top = Math.max(0, area.top), bottom = Math.min(window.innerHeight, area.bottom);
+    const left = Math.max(0, area.left), right = Math.min(window.innerWidth, area.right);
+    if (bottom <= top || right <= left) return null;
+    const middle = (top + bottom) / 2;
+    const visible = [...chatNode.querySelectorAll('.mes[mesid]')].flatMap(node => {
+        const index = Number(node.getAttribute('mesid')), message = ctx.chat[index];
+        if (!Number.isInteger(index) || !eligible(message)) return [];
+        const rect = node.getBoundingClientRect(), style = window.getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0 || rect.bottom <= top || rect.top >= bottom || rect.right <= left || rect.left >= right) return [];
+        return [{ node, message, index, distance: Math.max(rect.top - middle, middle - rect.bottom, 0), visibleHeight: Math.min(rect.bottom, bottom) - Math.max(rect.top, top) }];
+    });
+    return visible.find(entry => entry.node === focusedFloor) ?? visible.sort((a, b) => a.distance - b.distance || b.visibleHeight - a.visibleHeight)[0] ?? null;
+}
+
 function renderFloatingFeedback() {
-    const ctx = controller.context();
-    const messages = ctx.chat.map((message, index) => ({ message, index })).filter(({ message }) => eligible(message));
-    if (floatingChat !== ctx.chat) { floatingChat = ctx.chat; selectedMessage = null; followLatest = true; }
-    if (followLatest) selectedMessage = messages.at(-1)?.message;
-    if (!selectedMessage || !messages.some(entry => entry.message === selectedMessage)) selectedMessage = messages.at(-1)?.message;
-    floatingSelect.replaceChildren(...messages.slice().reverse().map(({ message, index }) => {
-        const option = el('option', '', `第 ${index} 层 · ${String(message.mes).replace(/\s+/g, ' ').slice(0, 45)}`);
-        option.value = String(index); option.selected = message === selectedMessage; return option;
-    }));
-    floatingSelect.disabled = controller.busy || !messages.length;
-    if (!selectedMessage || !controller.supported(ctx)) { floatingFeedback.replaceChildren(el('p', 'rpp-empty', '当前没有可评价的角色回复。')); return; }
-    const index = ctx.chat.indexOf(selectedMessage), revision = revisionOf(selectedMessage), feedback = currentFeedback(selectedMessage);
+    if (!floatingWindow || floatingWindow.hidden) return;
+    const ctx = controller.context(), target = controller.supported(ctx) ? visibleReply(ctx) : null;
+    if (!target) {
+        floatingHeading.textContent = '当前楼层评价'; floatingPreview.textContent = '';
+        floatingFeedback.replaceChildren(el('p', 'rpp-empty', '请将要评价的角色回复滚动到聊天可见区域。'));
+        return;
+    }
+    const { message, index } = target, revision = revisionOf(message), feedback = currentFeedback(message);
+    floatingHeading.textContent = `第 ${index} 楼 · 评价`;
+    floatingPreview.textContent = String(message.mes).replace(/\s+/g, ' ').slice(0, 140);
     const old = floatingFeedback.querySelector('.rpp-feedback');
     const binding = old && floorBindings.get(old);
-    if (!old || binding?.chat !== ctx.chat || binding?.message !== selectedMessage || old.dataset.revision !== revision || old.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || old.dataset.index !== String(index)) {
-        const row = createFeedbackRow(selectedMessage, index, ctx.chat); row.open = true;
-        floorBindings.set(row, { chat: ctx.chat, message: selectedMessage }); floatingFeedback.replaceChildren(row);
+    if (!old || binding?.chat !== ctx.chat || binding?.message !== message || old.dataset.revision !== revision || old.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || old.dataset.index !== String(index)) {
+        const row = createFeedbackRow(message, index, ctx.chat); row.open = true;
+        floorBindings.set(row, { chat: ctx.chat, message }); floatingFeedback.replaceChildren(row);
+        floatingStatus.textContent = '';
     }
     for (const input of floatingFeedback.querySelectorAll('button, select, textarea')) input.disabled = controller.busy;
+    floatingWindow.querySelector('#rpp-floating-cancel').hidden = !controller.busy;
+}
+
+function viewportChanged(event) {
+    if (event?.target?.closest?.('#rpp-floating-window, #rpp-panel')) return;
+    focusedFloor = null;
+    clearTimeout(visibleFloorTimer);
+    visibleFloorTimer = setTimeout(renderFloatingFeedback, 80);
+}
+function focusReadingFloor(event) {
+    focusedFloor = event.target?.closest?.('#chat .mes[mesid]') ?? focusedFloor;
+    renderFloatingFeedback();
 }
 
 function renderCharacterSupplement() {
@@ -498,16 +524,15 @@ function render() {
     const settings = controller.settings();
     automaticOptions.hidden = !settings.autoAnalyze;
     analysisModeHelp.textContent = settings.autoAnalyze ? `自动：每累计 ${settings.threshold} 条新评价分析一次。“保存并分析”仍可直接分析当前这一条。` : '手动模式：保存反馈只记录；保存并分析直接分析这一条，不用累计。';
-    bulkAnalysisHelp.textContent = `“分析并应用”批量处理最近 ${settings.recentUserTurns} 轮 user 对话内所有未处理评价。每次分析都携带旧结论，供 AI 修正。`;
+    bulkAnalysisHelp.textContent = '“分析并应用”处理本档未处理评价，只带上这些评价对应的楼层正文，并携带旧结论供 AI 修正。';
     choosePage(activePage);
     const floating = controller.settings().feedbackMode === 'floating';
     floatingButton.hidden = !controller.settings().enabled || !floating;
     if (floatingButton.hidden) closeFloating(false);
-    workbench.querySelector('#rpp-floating-fields').hidden = !floating;
-    workbench.querySelector('#rpp-floor-hint').hidden = floating;
+    workbench.querySelector('#rpp-floor-hint').textContent = floating ? '悬浮球模式：滚动到要评价的回复，点击悬浮球填写该楼层评价。' : '楼层模式：在角色回复下展开“反馈”填写。';
     renderProfile(); renderFloors(); renderCharacterSupplement();
     if (floating) renderFloatingFeedback(); else floatingFeedback.replaceChildren();
-    floatingButton.setAttribute('aria-label', '打开喵喵修正中心');
+    floatingButton.setAttribute('aria-label', '评价当前浏览楼层');
     for (const control of workbench.querySelectorAll('[data-mutation]')) control.disabled = controller.busy || !controller.supported(controller.context());
     workbench.querySelector('#rpp-cancel').disabled = !controller.busy;
 }
@@ -522,6 +547,7 @@ export function initialize() {
         analyzer: (ctx, settings, prompt, options) => callAnalyzer(ctx, settings, prompt, { ...options, apiKey: options.apiKey || sessionApiKey }) });
     Object.assign(controller.settings(), { ...DEFAULTS, ...controller.settings() });
     delete controller.settings().feedbackBatchSize;
+    delete controller.settings().recentUserTurns; delete controller.settings().contextWindow;
     const ctx = controller.context(), types = ctx.eventTypes ?? ctx.event_types;
     function on(name, handler) { if (types?.[name]) { ctx.eventSource.on(types[name], handler); subscriptions.push([types[name], handler]); } }
     on('APP_READY', deferRefresh);
@@ -536,6 +562,9 @@ export function initialize() {
         if (records.some(record => [...record.addedNodes].some(node => node.nodeType === 1 && (node.matches?.('.mes[mesid], #chat, #extensions_settings2, #firstMessageWrapper, #first_message_div, #description_textarea') || node.querySelector?.('.mes[mesid], #firstMessageWrapper, #first_message_div'))))) deferRefresh();
     });
     window.addEventListener('resize', positionFloating);
+    window.addEventListener('resize', viewportChanged);
+    document.addEventListener('scroll', viewportChanged, true);
+    document.addEventListener('click', focusReadingFloor);
     observer.observe(document.body, { childList: true, subtree: true }); controller.refresh();
     // Version adaptation: getContext is preferred; legacy hosts export the live flag here.
     import('/script.js').then(module => { nativeHostState = module; }).catch(() => {});
@@ -548,8 +577,12 @@ export function onDisable() {
     subscriptions.length = 0;
     ctx?.setExtensionPrompt(KEY, '', 1, 0, false, 0);
     window.removeEventListener('resize', positionFloating);
+    window.removeEventListener('resize', viewportChanged);
+    document.removeEventListener('scroll', viewportChanged, true);
+    document.removeEventListener('click', focusReadingFloor);
+    clearTimeout(visibleFloorTimer);
     document.querySelectorAll('.rpp-feedback, #rpp-panel, #rpp-floating-button, #rpp-floating-window, #rpp-character-supplement').forEach(node => node.remove());
-    panel = null; floatingButton = null; floatingWindow = null; floatingChat = null; selectedMessage = null; controller = null; itemDrafts.clear(); manualDrafts.clear(); renderedMetadata = null;
+    panel = null; floatingButton = null; floatingWindow = null; floatingFeedback = null; floatingStatus = null; focusedFloor = null; controller = null; itemDrafts.clear(); manualDrafts.clear(); renderedMetadata = null;
 }
 
 export const onEnable = initialize;

@@ -108,13 +108,13 @@ test('无效模型输出可以重试；用户确认补充保留，撤销可恢�
     await ctl.setChatEnabled(false); assert.equal(h.ctx.injection.text, '');
 });
 
-test('评过分的旧楼层与附近 user 文本也进入分析，不只看最近上下文', () => {
+test('评价与对应楼层正文绑定，不夹带附近消息或聊天末尾无关文本', () => {
     const h = host(), feedback = normalizeFeedback({ plot: 5 });
     h.ctx.chat[1].extra = { [KEY]: { versions: { [revisionOf(h.ctx.chat[1])]: feedback } } };
     h.ctx.chat.push(...Array.from({ length: 30 }, (_, i) => ({ mes: `后续 ${i}`, is_user: i % 2 === 0 })));
     const data = JSON.parse(analysisInput(h.ctx, newState(), { ...DEFAULTS, contextWindow: 2, recentUserTurns: 50 }).prompt);
-    assert.equal(data.transcript[0].text, '我有点冷。');
-    assert.equal(data.feedback[0].id, feedback.id); assert.equal(data.transcript.at(-1).floor, 31);
+    assert.deepEqual(data.transcript, [{ feedbackId: feedback.id, floor: 1, speaker: 'char', text: h.ctx.chat[1].mes }]);
+    assert.equal(data.feedback[0].id, feedback.id);
 });
 
 test('自定义 API 请求结构、错误处理、密钥不进入分析数据', async () => {
@@ -286,27 +286,27 @@ test('切回旧回复、删除后重加、撤销和清空不会让已处理评�
     await ctl.clearProfile(); assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
 });
 
-test('自动累计数就是批次大小，手动批量不再有第二个上限，指定楼层不受范围限制', async () => {
+test('自动累计数就是批次大小，旧范围设置不影响评价与楼层绑定', async () => {
     const h = host(), ctl = h.make();
     for (let i = 0; i < 4; i++) {
         if (i) h.ctx.chat.push({ mes: `user ${i}`, is_user: true }, { mes: `char ${i}` });
         await ctl.saveFeedback(i * 2 + 1, { note: `偏好 ${i}` });
     }
     const settings = { ...DEFAULTS, recentUserTurns: 2, threshold: 1, feedbackBatchSize: 1 };
-    assert.equal(analysisInput(h.ctx, ctl.state(), settings).pending.length, 2); // ignore the old v0.4.0 cap
+    assert.equal(analysisInput(h.ctx, ctl.state(), settings).pending.length, 4); // ignore old range and cap
     const targeted = analysisInput(h.ctx, ctl.state(), settings, { feedbackIds: [currentFeedback(h.ctx.chat[1]).id] });
     assert.deepEqual(targeted.pending.map(f => f.index), [1]);
-    assert.equal(JSON.parse(targeted.prompt).transcript[0].text, '我有点冷。');
+    assert.equal(JSON.parse(targeted.prompt).transcript[0].text, h.ctx.chat[1].mes);
     const first = analysisInput(h.ctx, ctl.state(), settings, { automatic: true }), payload = JSON.parse(first.prompt);
     assert.equal(payload.feedback.length, 1); assert.equal(payload.feedback[0].index, 7);
     assert.equal(first.pending.length, 1);
     ctl.state().consumed.push(feedbackKey(first.pending[0]));
-    assert.throws(() => analysisInput(h.ctx, ctl.state(), { ...settings, threshold: 2 }, { automatic: true }), /尚未累计/);
+    assert.throws(() => analysisInput(h.ctx, ctl.state(), { ...settings, threshold: 4 }, { automatic: true }), /尚未累计/);
     const next = analysisInput(h.ctx, ctl.state(), settings, { automatic: true });
     assert.equal(next.pending[0].index, 5);
     ctl.state().consumed.push(feedbackKey(next.pending[0]));
-    assert.throws(() => analysisInput(h.ctx, ctl.state(), settings), /没有新的/);
-    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 2); // older, unseen evaluations remain auditable
+    assert.equal(analysisInput(h.ctx, ctl.state(), settings).pending.length, 2);
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 2);
 });
 
 test('增量分析携带上次完整结论，只发送新评价；保留旧来源的结论可以更新', async () => {
