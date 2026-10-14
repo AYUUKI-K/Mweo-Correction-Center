@@ -18,7 +18,12 @@ let selected=0,calls=0;
 const ctx = {characters:[{name:'沈砚',avatar:'fixture.png',data:{description:'安静、慢热，常通过行动表达关心。',personality:'克制，尊重他人的选择。'}}],characterId:0,groupId:null,chatId:chats[0].id,chat:chats[0].chat,chatMetadata:chats[0].metadata,extensionSettings:{},eventTypes,eventSource,
 streamingProcessor:{isStopped:false,isFinished:true},
 saveSettingsDebounced(){},async saveChat(){},setExtensionPrompt(k,text){window.injectedPrompt=text},
-async generateRaw({prompt}){calls++;document.querySelector('#fixture-status').textContent='本地模拟分析 '+calls+' 次，无真实 API 请求。';await new Promise(r=>setTimeout(r,500));const p=JSON.parse(prompt);return JSON.stringify({summary:'示例分析：用户希望保持慢热、避免过度黏人。整体评分不能直接证明具体的剧情或文风偏好。',categoryReports:{interaction:{status:'updated',reason:'短评明确希望保持角色慢热，避免过度黏人。'},plot:{status:'insufficient',reason:'仅给出总体满意度，没有明确偏好的剧情类型或推进方式。'},expression:{status:'insufficient',reason:'没有针对文风、对白比例或描写细节的反馈。'}},items:[...(p.previousAnalysis?.items??[]).filter(item=>item.category!=='interaction'),{category:'interaction',text:'通过行动表达关心，保持原角色慢热、克制的表达习惯，避免过度黏人。',confidence:p.feedback.some(f=>f.note)?'explicit':'tentative',sourceIds:p.newFeedbackIds}]})}};
+async generateRaw({prompt}){
+    calls++;document.querySelector('#fixture-status').textContent='本地模拟自动分析 '+calls+' 次，无真实 API 请求。';
+    await new Promise(r=>setTimeout(r,500));const p=JSON.parse(prompt);
+    const item=(category,text,confidence)=>({category,text,confidence,sourceIds:p.newFeedbackIds,previousItemIds:(p.previousAnalysis?.items??[]).filter(x=>x.category===category).map(x=>x.id)});
+    return JSON.stringify({summary:'模拟结果：结合新评价修订整份偏好；剧情及文笔为间接推测，保留待确认。此处为预设演示，不是真实模型推断。',categoryReports:{interaction:{status:'updated',reason:'模拟：按短评调整角色表达关心的方式。'},plot:{status:'updated',reason:'模拟候选：高评分回复推进较克制，但无法仅凭分数确认喜好。'},expression:{status:'updated',reason:'模拟候选：回复以简短对白和动作呈现关心，文笔偏好待确认。'}},items:[item('interaction','通过行动表达关心，保持原角色慢热、克制的表达习惯。',p.feedback.some(f=>f.note)?'explicit':'tentative'),item('plot','可能偏好逐步推进关系，避免过快跨越发展阶段。','tentative'),item('expression','可能偏好简短对白和具体动作描写，减少空泛抒情。','tentative')]});
+}};
 window.SillyTavern={getContext:()=>({...ctx})};
 function draw(){const chat=document.querySelector('#chat');chat.replaceChildren(...ctx.chat.map((m,i)=>{const floor=document.createElement('div');floor.className='mes';floor.setAttribute('mesid',i);const block=document.createElement('div');block.className='mes_block';const title=document.createElement('b');title.textContent=m.is_user?'你':'沈砚';const content=document.createElement('p');content.style.whiteSpace='pre-wrap';content.textContent=m.mes;block.append(title,content);floor.append(block);return floor}))}
 document.querySelector('#theme').onclick=()=>document.body.classList.toggle('light');

@@ -107,6 +107,7 @@ function saveSetting(key, value) {
     controller.settings()[key] = value;
     if (key === 'feedbackMode' && value !== 'floating') closeFloating(false);
     controller.context().saveSettingsDebounced(); controller.refresh();
+    if ((key === 'autoAnalyze' && value) || key === 'threshold') controller.scheduleAuto();
 }
 function settingInput(label, key, type = 'text', min, max) {
     const input = el('input', 'text_pole'); input.type = type; input.value = controller.settings()[key];
@@ -127,7 +128,7 @@ function mountPanel() {
     panel = el('section', 'rpp-panel'); panel.id = 'rpp-panel';
     const drawer = el('details', 'rpp-drawer');
     const title = el('summary', 'rpp-title standoutHeader'); const chevron = icon('chevron'); chevron.classList.add('rpp-chevron');
-    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', 'v0.5.0'), chevron); drawer.append(title);
+    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', 'v0.6.0'), chevron); drawer.append(title);
     const body = el('div', 'rpp-body');
     const entranceField = el('fieldset', 'rpp-entrance'); entranceField.append(el('legend', '', '反馈入口（二选一）'));
     for (const [value, label] of [['floors', '楼层反馈'], ['floating', '悬浮球']]) {
@@ -165,13 +166,12 @@ function mountPanel() {
     const floorHint = el('p', 'rpp-help', '楼层模式：在角色回复下展开“反馈”填写。'); floorHint.id = 'rpp-floor-hint'; feedbackSection.append(floorHint);
     automaticOptions = el('div', 'rpp-automatic-options'); automaticOptions.id = 'rpp-automatic-options';
     automaticOptions.append(settingInput('每累计多少条新评价自动分析', 'threshold', 'number', 1, 20));
-    automaticOptions.append(el('p', 'rpp-help', '累计 N 条就分析最近 N 条新评价，不另设处理上限。相同评价不会重复计数。'));
+    automaticOptions.append(el('p', 'rpp-help', '累计 N 条就按提交顺序分析一批新评价。相同评价不会重复计数；新版修正整体替换旧版。'));
     analysisModeHelp = el('p', 'rpp-help');
     pages.settings.append(entranceField, checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)), automaticOptions, analysisModeHelp);
     const actions = el('div', 'rpp-actions');
-    const analyze = button('分析并应用', () => controller.analyze({ apiKey: sessionApiKey }), true); analyze.dataset.mutation = 'true';
     const cancel = button('取消本次应用', () => { controller.cancel(); announce('已取消本次应用。酒馆当前 API 请求可能仍需等待结束。'); }); cancel.id = 'rpp-cancel';
-    actions.append(analyze, cancel); feedbackSection.append(actions);
+    actions.append(cancel); feedbackSection.append(actions);
     status = el('p', 'rpp-status', '当前存档已就绪。'); status.setAttribute('role', 'status'); workbench.insertBefore(status, pages.overview);
     analysisSummaryDetails = el('details', 'rpp-analysis-details'); analysisSummaryDetails.append(el('summary', '', '查看本次分析说明'));
     analysisSummary = el('p', 'rpp-analysis-summary'); analysisSummaryDetails.append(analysisSummary); pages.records.append(analysisSummaryDetails);
@@ -292,7 +292,7 @@ function renderProfile() {
         row.append(field('偏好补充内容', input));
         row.append(checkbox('启用这条补充', draft.enabled, value => { draft.enabled = value; itemDrafts.set(item.id, draft); }));
         const sources = item.sourceIds.map(id => valid.find(f => f.id === id)).filter(Boolean).map(f => `第 ${f.index} 层`).join('、');
-        row.append(el('p', 'rpp-help', item.manual ? '用户确认的补充会保留，后续分析不会自动改写。' : `反馈来源：${sources || '原回复版本已变化'}。保存修改后视为用户确认。`));
+        row.append(el('p', 'rpp-help', item.manual ? '你保存的修改会交给下一轮分析，AI 可结合新评价保留、改写或删除。' : `反馈来源：${sources || (item.userAnchored ? '上一版用户补充' : '原回复版本已变化')}。此条会参与后续整份修正。`));
         const actions = el('div', 'rpp-actions');
         const save = button('保存修改', async () => { await controller.editItem(item.id, input.value, draft.enabled); itemDrafts.delete(item.id); renderProfile(); });
         const remove = button('删除', async () => { await controller.deleteItem(item.id); itemDrafts.delete(item.id); });
@@ -325,20 +325,17 @@ function createFeedbackRow(message, index, chat) {
     function checkVersion() {
         if (controller.context().chat !== chat || chat[index] !== message || revisionOf(message) !== revision) throw new Error('回复版本或聊天已变化，请重新展开反馈。');
     }
-    async function submit(apply) {
+    async function submit() {
         try {
             checkVersion(); await controller.saveFeedback(index, draft); feedbackDrafts.delete(message);
-            const saved = currentFeedback(message);
-            if (apply && saved && pendingFeedback(chat, controller.state()).some(f => f.id === saved.id)) await controller.analyze({ apiKey: sessionApiKey, feedbackIds: [saved.id] });
         } catch (error) { localStatus.textContent = error.message; localStatus.classList.add('rpp-error'); announce(error.message, true); }
     }
     const actions = el('div', 'rpp-actions');
-    const save = button('保存反馈', () => submit(false));
-    const apply = button('保存并分析', () => submit(true), true);
+    const save = button('保存反馈', submit, true);
     const remove = button('移除反馈', async () => { checkVersion(); await controller.removeFeedback(index); feedbackDrafts.delete(message); });
     remove.hidden = !feedback;
-    actions.append(save, apply, remove); form.append(actions, localStatus);
-    form.addEventListener('submit', event => { event.preventDefault(); perform(() => submit(false)); });
+    actions.append(save, remove); form.append(actions, localStatus);
+    form.addEventListener('submit', event => { event.preventDefault(); perform(submit); });
     details.append(form); return details;
 }
 
@@ -523,8 +520,9 @@ function render() {
     mountFloating();
     const settings = controller.settings();
     automaticOptions.hidden = !settings.autoAnalyze;
-    analysisModeHelp.textContent = settings.autoAnalyze ? `自动：每累计 ${settings.threshold} 条新评价分析一次。“保存并分析”仍可直接分析当前这一条。` : '手动模式：保存反馈只记录；保存并分析直接分析这一条，不用累计。';
-    bulkAnalysisHelp.textContent = '“分析并应用”处理本档未处理评价，只带上这些评价对应的楼层正文，并携带旧结论供 AI 修正。';
+    analysisModeHelp.textContent = settings.autoAnalyze ? `保存即可：每累计 ${settings.threshold} 条新评价自动修订整份补充，包含角色、剧情与文笔。` : '自动分析已暂停，保存的评价仍会保留，开启后再按累计数量分析。';
+    const waiting = controller.supported(controller.context()) ? pendingFeedback(controller.context().chat, controller.state()).length : 0;
+    bulkAnalysisHelp.textContent = `待分析 ${waiting} 条 / 累计 ${settings.threshold} 条自动触发。每轮用新评价及对应正文修订上一版全部补充，包括你手动编辑的内容。`;
     choosePage(activePage);
     const floating = controller.settings().feedbackMode === 'floating';
     floatingButton.hidden = !controller.settings().enabled || !floating;
@@ -535,6 +533,7 @@ function render() {
     floatingButton.setAttribute('aria-label', '评价当前浏览楼层');
     for (const control of workbench.querySelectorAll('[data-mutation]')) control.disabled = controller.busy || !controller.supported(controller.context());
     workbench.querySelector('#rpp-cancel').disabled = !controller.busy;
+    workbench.querySelector('#rpp-cancel').hidden = !controller.busy;
 }
 function deferRefresh() { clearTimeout(renderTimer); renderTimer = setTimeout(() => controller?.refresh(), 60); }
 
@@ -545,7 +544,10 @@ export function initialize() {
         return typeof nativeHostState?.is_send_press === 'boolean' ? nativeHostState.is_send_press : undefined;
     }, notify: announce, changed: render,
         analyzer: (ctx, settings, prompt, options) => callAnalyzer(ctx, settings, prompt, { ...options, apiKey: options.apiKey || sessionApiKey }) });
-    Object.assign(controller.settings(), { ...DEFAULTS, ...controller.settings() });
+    const settingsBeforeUpgrade = controller.settings();
+    const upgradeAnalysis = !settingsBeforeUpgrade.analysisFlowVersion;
+    Object.assign(controller.settings(), { ...DEFAULTS, ...settingsBeforeUpgrade });
+    if (upgradeAnalysis) { controller.settings().autoAnalyze = true; controller.settings().analysisFlowVersion = 1; controller.context().saveSettingsDebounced(); }
     delete controller.settings().feedbackBatchSize;
     delete controller.settings().recentUserTurns; delete controller.settings().contextWindow;
     const ctx = controller.context(), types = ctx.eventTypes ?? ctx.event_types;

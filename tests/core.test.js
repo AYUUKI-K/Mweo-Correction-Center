@@ -9,7 +9,7 @@ function host() {
         chatId: 'save-a', characterId: 0, groupId: null,
         characters: [{ avatar: 'char.png', name: '测试角色', data: { description: '性格慢热，关心时克制。', personality: '慢热' } }],
         chat: [{ mes: '我有点冷。', is_user: true }, { mes: '他把围巾放到你旁边。', name: '测试角色', swipe_id: 0 }],
-        chatMetadata: {}, extensionSettings: {},
+        chatMetadata: {}, extensionSettings: { [KEY]: { ...DEFAULTS, autoAnalyze: false } },
         async saveChat() {}, saveSettingsDebounced() {},
         setExtensionPrompt(key, text, position, depth, scan, role) { this.injection = { key, text, position, depth, scan, role }; },
     };
@@ -93,7 +93,7 @@ test('保存失败回滚评分和偏好；无效楼层不会永久锁住插件',
     assert.equal(ctl.state().profile.length, 0); assert.equal(ctl.state().consumed.length, 0);
 });
 
-test('无效模型输出可以重试；用户确认补充保留，撤销可恢复分析前状态', async () => {
+test('无效模型输出可以重试；新版整体替换用户编辑补充，撤销可恢复上一版', async () => {
     const h = host(); let bad = true;
     const ctl = h.make(async () => bad ? 'broken' : result(currentFeedback(h.ctx.chat[1]).id));
     await ctl.saveFeedback(1, { note: '用行动关心' });
@@ -102,9 +102,9 @@ test('无效模型输出可以重试；用户确认补充保留，撤销可恢�
     const id = ctl.state().profile[0].id;
     await ctl.editItem(id, '用户确认的补充', true);
     await ctl.saveFeedback(1, { note: '节奏放慢' }); await ctl.analyze();
-    assert.equal(ctl.state().profile[0].text, '用户确认的补充');
+    assert.equal(ctl.state().profile[0].text, '用细微行动表达关心。');
     await ctl.clearProfile(); assert.equal(h.ctx.injection.text, '');
-    await ctl.undo(); assert.match(h.ctx.injection.text, /用户确认的补充/);
+    await ctl.undo(); assert.match(h.ctx.injection.text, /细微行动/);
     await ctl.setChatEnabled(false); assert.equal(h.ctx.injection.text, '');
 });
 
@@ -185,12 +185,12 @@ test('自动分析积压仍只处理 N 条，楼层手动分析不会顺带消�
     }
     ctl.settings().threshold = 3; ctl.settings().feedbackBatchSize = 1;
     await ctl.analyze({ automatic: true });
-    assert.deepEqual(payloads[0].feedback.map(f => f.index), [5, 7, 9]);
+    assert.deepEqual(payloads[0].feedback.map(f => f.index), [1, 3, 5]);
     assert.equal(ctl.state().consumed.length, 3);
-    const target = currentFeedback(h.ctx.chat[1]).id;
+    const target = currentFeedback(h.ctx.chat[7]).id;
     await ctl.analyze({ feedbackIds: [target] });
     assert.deepEqual(payloads[1].newFeedbackIds, [target]);
-    assert.deepEqual(pendingFeedback(h.ctx.chat, ctl.state()).map(f => f.index), [3]);
+    assert.deepEqual(pendingFeedback(h.ctx.chat, ctl.state()).map(f => f.index), [9]);
 });
 
 test('手动角色相处补充仅写当前档，可撤销，角色描述及开场白不变', async () => {
@@ -298,12 +298,12 @@ test('自动累计数就是批次大小，旧范围设置不影响评价与楼�
     assert.deepEqual(targeted.pending.map(f => f.index), [1]);
     assert.equal(JSON.parse(targeted.prompt).transcript[0].text, h.ctx.chat[1].mes);
     const first = analysisInput(h.ctx, ctl.state(), settings, { automatic: true }), payload = JSON.parse(first.prompt);
-    assert.equal(payload.feedback.length, 1); assert.equal(payload.feedback[0].index, 7);
+    assert.equal(payload.feedback.length, 1); assert.equal(payload.feedback[0].index, 1);
     assert.equal(first.pending.length, 1);
     ctl.state().consumed.push(feedbackKey(first.pending[0]));
     assert.throws(() => analysisInput(h.ctx, ctl.state(), { ...settings, threshold: 4 }, { automatic: true }), /尚未累计/);
     const next = analysisInput(h.ctx, ctl.state(), settings, { automatic: true });
-    assert.equal(next.pending[0].index, 5);
+    assert.equal(next.pending[0].index, 3);
     ctl.state().consumed.push(feedbackKey(next.pending[0]));
     assert.equal(analysisInput(h.ctx, ctl.state(), settings).pending.length, 2);
     assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 2);
@@ -358,4 +358,64 @@ test('注入使用单一修正 XML 根节点，内容中的 XML 符号不会逃�
     assert.equal(h.ctx.injection.text.endsWith('\n</修正>'), true);
     assert.match(h.ctx.injection.text, /&lt;短句&gt; &amp;/);
     assert.equal((h.ctx.injection.text.match(/<\/修正>/g) ?? []).length, 1);
+});
+
+test('123 自动得到 A，456 加完整 A 得到 B；B 整体替换且可改删用户编辑条目', async () => {
+    const h = host(), payloads = [];
+    const ctl = h.make(async (ctx, settings, prompt) => {
+        const p = JSON.parse(prompt); payloads.push(p);
+        const first = !p.previousAnalysis;
+        return JSON.stringify({ summary: first ? 'A：三类偏好初稿' : 'B：改相处，删剧情，保留表达', categoryReports: reports, items: first ? [
+            { category: 'interaction', text: 'A 相处', confidence: 'explicit', sourceIds: p.newFeedbackIds },
+            { category: 'plot', text: 'A 剧情候选', confidence: 'tentative', sourceIds: p.newFeedbackIds },
+            { category: 'expression', text: 'A 文笔候选', confidence: 'tentative', sourceIds: p.newFeedbackIds },
+        ] : [
+            { category: 'interaction', text: 'B 相处：主动但克制', confidence: 'explicit', sourceIds: p.newFeedbackIds, previousItemIds: [p.previousAnalysis.items.find(x => x.category === 'interaction').id] },
+            { category: 'expression', text: 'A 文笔候选', confidence: 'tentative', sourceIds: [], previousItemIds: [p.previousAnalysis.items.find(x => x.category === 'expression').id] },
+        ] });
+    });
+    ctl.settings().autoAnalyze = true;
+    const submitRound = async start => {
+        for (let n = start; n < start + 3; n++) {
+            if (n > 1) h.ctx.chat.push({ is_user: true, mes: `user ${n}` }, { mes: `回复 ${n}` });
+            await ctl.saveFeedback(h.ctx.chat.length - 1, { plot: 4, character: 5, note: `评价 ${n}` });
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+    };
+    await submitRound(1);
+    assert.equal(payloads.length, 1); assert.equal(ctl.state().profile.length, 3);
+    await ctl.editItem(ctl.state().profile.find(x => x.category === 'interaction').id, '用户改过的 A 相处', true);
+    await ctl.addItem('plot', '用户手动添加但允许 AI 删除');
+    const a = structuredClone(ctl.state().profile);
+    await submitRound(4);
+    assert.equal(payloads.length, 2);
+    assert.deepEqual(payloads[1].feedback.map(x => x.note), ['评价 4', '评价 5', '评价 6']);
+    assert.equal(payloads[1].previousAnalysis.items.length, 4);
+    assert.equal(payloads[1].previousAnalysis.items.every(x => x.editable), true);
+    assert.equal(payloads[1].previousAnalysis.items.find(x => x.category === 'interaction').text, '用户改过的 A 相处');
+    assert.equal(payloads[1].confirmedPreferences, undefined);
+    assert.deepEqual(ctl.state().profile.map(x => x.text), ['B 相处：主动但克制', 'A 文笔候选']);
+    assert.equal(ctl.state().profile[1].enabled, false);
+    assert.equal(ctl.state().profile[1].sourceIds.length, 3);
+    assert.equal(ctl.state().consumed.length, 6);
+    await ctl.undo(); assert.deepEqual(ctl.state().profile, a);
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
+});
+
+test('无评分来源的用户补充可通过历史 ID 保留，伪造历史来源会拒绝，失败保留 A', async () => {
+    const h = host(); let invalid = false;
+    const ctl = h.make(async (ctx, settings, prompt) => {
+        const p = JSON.parse(prompt), old = p.previousAnalysis.items[0];
+        return JSON.stringify({ summary: '保留用户补充', categoryReports: reports, items: [{ category: old.category, text: old.text, confidence: 'explicit', sourceIds: [], previousItemIds: [invalid ? '不存在的历史条目' : old.id] }] });
+    });
+    await ctl.addItem('expression', '减少空泛抒情');
+    await ctl.saveFeedback(1, { note: '继续保持' }); await ctl.analyze();
+    assert.match(h.ctx.injection.text, /减少空泛抒情/);
+    assert.equal(ctl.state().profile[0].userAnchored, true);
+    const previous = structuredClone(ctl.state().profile);
+    h.ctx.chat.push({ mes: 'user', is_user: true }, { mes: '新回复' });
+    await ctl.saveFeedback(3, { note: '新评价' }); invalid = true;
+    await assert.rejects(ctl.analyze(), /无效内容或反馈来源/);
+    assert.deepEqual(ctl.state().profile, previous);
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 1);
 });

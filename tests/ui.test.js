@@ -62,7 +62,7 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     assert.equal(document.querySelector('#rpp-main-settings').style.getPropertyPriority('background'), 'important');
     assert.equal(document.querySelector('#rpp-main-overview').style.background, 'transparent');
     assert.equal(document.querySelector('#rpp-main-overview').style.boxShadow, 'none');
-    assert.equal(document.querySelector('#rpp-automatic-options').hidden, true);
+    assert.equal(document.querySelector('#rpp-automatic-options').hidden, false);
     assert.equal(document.querySelector('.rpp-reading-options'), null);
     assert.equal(document.querySelector('.rpp-title').classList.contains('standoutHeader'), true);
     const auto = [...document.querySelectorAll('label')].find(label => label.textContent === '累计反馈后自动分析').querySelector('input');
@@ -79,7 +79,10 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     findButton('保存反馈').click(); await tick();
     assert.match(document.querySelector('.rpp-feedback summary').textContent, /已保存/);
     assert.equal(calls, 0);
-    findButton('分析并应用').click(); await tick();
+    assert.equal(findButton('保存并分析'), undefined); assert.equal(findButton('分析并应用'), undefined);
+    const threshold = [...document.querySelectorAll('label')].find(label => label.textContent === '每累计多少条新评价自动分析').nextElementSibling;
+    threshold.value = '1'; threshold.dispatchEvent(new window.Event('change'));
+    auto.checked = true; auto.dispatchEvent(new window.Event('change')); await tick();
     document.querySelector('#rpp-tab-plot').click();
     assert.equal(document.querySelector('#rpp-tab-interaction').classList.contains('rpp-is-active'), false);
     assert.equal(document.querySelector('#rpp-tab-plot').classList.contains('rpp-is-active'), true);
@@ -139,7 +142,8 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     ctx.chatMetadata = {}; ctx.chatId = 'many'; viewedIndex = 997; drawChat(); eventSource.emit('CHAT_CHANGED'); await tick();
     assert.match(document.querySelector('.rpp-floating-toolbar').textContent, /第 997 楼/);
     const farNote = document.querySelector('.rpp-floating-feedback textarea'); farNote.value = '只评价 997'; farNote.dispatchEvent(new window.Event('input'));
-    [...document.querySelectorAll('.rpp-floating-feedback button')].find(b => b.textContent === '保存并分析').click(); await tick();
+    assert.equal([...document.querySelectorAll('.rpp-floating-feedback button')].some(b => b.textContent === '保存并分析'), false);
+    [...document.querySelectorAll('.rpp-floating-feedback button')].find(b => b.textContent === '保存反馈').click(); await tick();
     assert.equal(ctx.chat[997].extra[KEY].versions[Object.keys(ctx.chat[997].extra[KEY].versions)[0]].note, '只评价 997');
     assert.equal(ctx.chat[999].extra, undefined);
     const longReply = ctx.chat[997], longText = longReply.mes;

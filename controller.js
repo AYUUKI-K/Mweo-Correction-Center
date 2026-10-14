@@ -102,6 +102,7 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         const run = { abort: new AbortController(), cancelled: false };
         busy = true; task = run; changed();
         notify(automatic ? '正在分析累计反馈…' : '正在分析反馈与相关上下文…');
+        let didApply = false;
         const timer = setTimeout(() => { run.cancelled = true; run.abort.abort(); notify('分析等待超过两分钟，结果将不再应用。请检查 API；反馈已保留。', true); }, 120000);
         try {
             const raw = await analyzer(ctx, { ...DEFAULTS, ...settings() }, input.prompt, { apiKey, signal: run.abort.signal });
@@ -110,12 +111,13 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             if (run.cancelled || key(current) !== originKey || current.chat !== originChat || current.chatMetadata !== originMetadata || state(current) !== originState || originState.epoch !== epoch || input.evidence.some(f => !activeKeys.has(feedbackKey(f)))) {
                 notify('聊天或反馈已变化，本次结果未应用。反馈已保留，可以重新分析。'); return;
             }
-            const result = parseResult(raw, input.evidence);
+            const result = parseResult(raw, input.evidence, { previousItems: input.previousItems });
             const previous = structuredClone(originState);
             checkpoint(originState);
-            const confirmed = originState.profile.filter(item => item.manual);
-            const excluded = new Set([...(originState.dismissed ?? []), ...confirmed.map(item => `${item.category}\0${item.text}`)]);
-            originState.profile = [...confirmed, ...result.items.filter(item => !excluded.has(`${item.category}\0${item.text}`)).slice(0, Math.max(0, 18 - confirmed.length))];
+            const excluded = new Set(originState.dismissed ?? []);
+            // B replaces A atomically, including entries the user edited. Omitted
+            // entries are deleted; never append protected old entries to B.
+            originState.profile = result.items.filter(item => !excluded.has(`${item.category}\0${item.text}`));
             originState.consumed = [...new Set([...originState.consumed, ...pendingKeys])];
             originState.summary = result.summary;
             originState.categoryReports = result.categoryReports;
@@ -124,10 +126,11 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             try {
                 if (await ctx.saveChat() === false) throw new Error('聊天存档保存失败。');
             } catch (error) { Object.assign(originState, previous); throw error; }
+            didApply = true;
             const applied = originState.enabled ? usableItems(ctx.chat, originState).length : 0;
             const candidates = originState.profile.filter(item => !item.enabled && item.confidence === 'tentative').length;
             notify(`分析完成：当前应用 ${applied} 条补充，${candidates} 条待确认。${!applied && candidates ? '请在三类偏好中确认需要的条目。' : ''}`);
-        } finally { clearTimeout(timer); if (task === run) task = null; busy = false; refresh(); }
+        } finally { clearTimeout(timer); if (task === run) task = null; busy = false; refresh(); if (didApply && automatic) scheduleAuto(); }
     }
     async function editItem(id, text, enabled) {
         const trimmed = String(text).trim();
