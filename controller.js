@@ -128,9 +128,8 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             } catch (error) { Object.assign(originState, previous); throw error; }
             didApply = true;
             const applied = originState.enabled ? usableItems(ctx.chat, originState).length : 0;
-            const candidates = originState.profile.filter(item => !item.enabled && item.confidence === 'tentative').length;
-            notify(`分析完成：当前应用 ${applied} 条补充，${candidates} 条待确认。${!applied && candidates ? '请在三类偏好中确认需要的条目。' : ''}`);
-        } finally { clearTimeout(timer); if (task === run) task = null; busy = false; refresh(); if (didApply && automatic) scheduleAuto(); }
+            notify(`自动修正完成：${applied} 条补充已生效，后续评价会继续修订。`);
+        } finally { clearTimeout(timer); if (task === run) task = null; busy = false; refresh(); if ((didApply && automatic) || key(context()) !== originKey) scheduleAuto(); }
     }
     async function editItem(id, text, enabled) {
         const trimmed = String(text).trim();

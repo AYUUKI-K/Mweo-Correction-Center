@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, currentFeedback, activeFeedback, buildInjection, parseResult, analysisInput, pendingFeedback, feedbackKey } from '../core.js';
+import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, currentFeedback, activeFeedback, buildInjection, parseResult, analysisInput, pendingFeedback, feedbackKey, migrateState } from '../core.js';
 import { createController } from '../controller.js';
 import { callAnalyzer, completionUrl } from '../api.js';
 
@@ -32,7 +32,10 @@ test('反馈随消息移动；切换/编辑回复后只认当前版本，回来�
 
 test('单次评分不能成为可靠偏好；错误来源或 JSON 不改变状态', () => {
     const evidence = [{ id: 'f1', index: 1, note: '' }];
-    for (const confidence of ['explicit', 'repeated']) assert.equal(parseResult(result('f1', confidence), evidence).items[0].enabled, false);
+    for (const confidence of ['explicit', 'repeated']) {
+        const item = parseResult(result('f1', confidence), evidence).items[0];
+        assert.equal(item.confidence, 'tentative'); assert.equal(item.enabled, true);
+    }
     assert.throws(() => parseResult(result('invented'), evidence), /来源/);
     assert.throws(() => parseResult('not json', evidence), /JSON/);
     assert.throws(() => normalizeFeedback({ plot: 9 }), /1～5/);
@@ -335,7 +338,7 @@ test('旧版处理 ID 迁移不重复，编辑旧评价仍能产生一个新版�
     h.ctx.chat[1].extra = { [KEY]: { versions: { [revisionOf(h.ctx.chat[1])]: f } } };
     h.ctx.chatMetadata[KEY] = { ...newState(), version: 1, consumed: [f.id] };
     const ctl = h.make();
-    assert.equal(ctl.state().version, 2); assert.equal(ctl.state().consumed[0], feedbackKey(f));
+    assert.equal(ctl.state().version, 3); assert.equal(ctl.state().consumed[0], feedbackKey(f));
     assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 0);
     await ctl.saveFeedback(1, { note: '修改后的偏好' });
     assert.equal(currentFeedback(h.ctx.chat[1]).id, f.id);
@@ -395,7 +398,7 @@ test('123 自动得到 A，456 加完整 A 得到 B；B 整体替换且可改删
     assert.equal(payloads[1].previousAnalysis.items.find(x => x.category === 'interaction').text, '用户改过的 A 相处');
     assert.equal(payloads[1].confirmedPreferences, undefined);
     assert.deepEqual(ctl.state().profile.map(x => x.text), ['B 相处：主动但克制', 'A 文笔候选']);
-    assert.equal(ctl.state().profile[1].enabled, false);
+    assert.equal(ctl.state().profile[1].enabled, true);
     assert.equal(ctl.state().profile[1].sourceIds.length, 3);
     assert.equal(ctl.state().consumed.length, 6);
     await ctl.undo(); assert.deepEqual(ctl.state().profile, a);
@@ -418,4 +421,18 @@ test('无评分来源的用户补充可通过历史 ID 保留，伪造历史来�
     await assert.rejects(ctl.analyze(), /无效内容或反馈来源/);
     assert.deepEqual(ctl.state().profile, previous);
     assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 1);
+});
+
+test('旧候选自动生效，手动停用保留，历史快照同步迁移且不重复分析', async () => {
+    const h = host(), ctl = h.make(async () => result(currentFeedback(h.ctx.chat[1]).id, 'tentative'));
+    await ctl.saveFeedback(1, { plot: 5 }); await ctl.analyze();
+    const old = ctl.state(); old.version = 2; old.profile[0].enabled = false;
+    old.profile.push({ id: 'paused', category: 'plot', text: '手动停用', confidence: 'manual', manual: true, sourceIds: [], enabled: false });
+    old.history = [{ profile: structuredClone(old.profile) }];
+    const migrated = migrateState(h.ctx.chat, old);
+    assert.equal(migrated.profile[0].enabled, true); assert.equal(migrated.profile[1].enabled, false);
+    assert.equal(migrated.history[0].profile[0].enabled, true);
+    assert.match(buildInjection(h.ctx.chat, migrated), /细微行动/);
+    assert.doesNotMatch(buildInjection(h.ctx.chat, migrated), /手动停用/);
+    assert.equal(pendingFeedback(h.ctx.chat, migrated).length, 0);
 });

@@ -11,25 +11,26 @@ main{max-width:1020px;margin:auto}h1{font-size:22px;margin-bottom:4px}.subtitle{
 <main><h1>喵喵修正中心</h1><p class="subtitle">当前存档的互动、剧情与表达偏好</p><div id="fixture-controls"><button id="theme" class="menu_button">切换明暗主题</button><button id="swipe" class="menu_button">切换回复版本</button><button id="switch" class="menu_button">切换存档</button></div><p id="fixture-status">本地模拟宿主，无真实 API 请求。</p><div class="fixture-grid"><section><div id="extensions_settings2"></div><div id="chat"></div></section><aside id="character-panel"><h2>沈砚 · 角色页</h2><div id="descriptionWrapper"><label for="description_textarea">角色描述</label><textarea class="text_pole" id="description_textarea" name="description" rows="6">安静、慢热，常通过行动表达关心。克制，尊重他人的选择。</textarea></div><div id="firstMessageWrapper"><div id="first_message_div"><label for="firstmessage_textarea">开场白</label></div><textarea class="text_pole" id="firstmessage_textarea" name="first_mes" rows="4">窗外飘起了初雪。他在窗边翻着书。</textarea></div><input type="hidden" id="avatar_url_pole" value="fixture.png"></aside></div></main>
 <script type="module">
 const handlers = new Map();
+const realFetch=window.fetch.bind(window);window.fetch=(url,options)=>realFetch(url==='https://raw.githubusercontent.com/AYUUKI-K/Mweo-Correction-Center/main/manifest.json'?'/fixture-update-manifest':url,options);
 const eventTypes = Object.fromEntries(['APP_READY','GENERATION_STARTED','GENERATION_ENDED','GENERATION_STOPPED','CHAT_CHANGED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SWIPED'].map(x=>[x,x]));
 const eventSource = {on(k,fn){handlers.set(k,[...(handlers.get(k)||[]),fn])},removeListener(k,fn){handlers.set(k,(handlers.get(k)||[]).filter(x=>x!==fn))},emit(k){for(const fn of handlers.get(k)||[])fn()}};
 const chats = [{id:'围巾与初雪',chat:[{mes:'外面好像下雪了。我出门时没带围巾。',is_user:true},{mes:'他停下翻书的动作，目光在窗外落了一瞬。\n\n“柜子第二层。”他说，又低下头去，“那条灰色的，你先拿着。”',swipe_id:0}],metadata:{}},{id:'旅途中的夜晚',chat:[{mes:'今晚我们在哪里落脚？',is_user:true},{mes:'“前面有间旅店。”他把地图收回衣袋，放慢脚步等你跟上。',swipe_id:0}],metadata:{}}];
 let selected=0,calls=0;
 const ctx = {characters:[{name:'沈砚',avatar:'fixture.png',data:{description:'安静、慢热，常通过行动表达关心。',personality:'克制，尊重他人的选择。'}}],characterId:0,groupId:null,chatId:chats[0].id,chat:chats[0].chat,chatMetadata:chats[0].metadata,extensionSettings:{},eventTypes,eventSource,
 streamingProcessor:{isStopped:false,isFinished:true},
-saveSettingsDebounced(){},async saveChat(){},setExtensionPrompt(k,text){window.injectedPrompt=text},
+getRequestHeaders(){return {'Content-Type':'application/json'}},saveSettingsDebounced(){},async saveChat(){},setExtensionPrompt(k,text){window.injectedPrompt=text},
 async generateRaw({prompt}){
     calls++;document.querySelector('#fixture-status').textContent='本地模拟自动分析 '+calls+' 次，无真实 API 请求。';
     await new Promise(r=>setTimeout(r,500));const p=JSON.parse(prompt);
     const item=(category,text,confidence)=>({category,text,confidence,sourceIds:p.newFeedbackIds,previousItemIds:(p.previousAnalysis?.items??[]).filter(x=>x.category===category).map(x=>x.id)});
-    return JSON.stringify({summary:'模拟结果：结合新评价修订整份偏好；剧情及文笔为间接推测，保留待确认。此处为预设演示，不是真实模型推断。',categoryReports:{interaction:{status:'updated',reason:'模拟：按短评调整角色表达关心的方式。'},plot:{status:'updated',reason:'模拟候选：高评分回复推进较克制，但无法仅凭分数确认喜好。'},expression:{status:'updated',reason:'模拟候选：回复以简短对白和动作呈现关心，文笔偏好待确认。'}},items:[item('interaction','通过行动表达关心，保持原角色慢热、克制的表达习惯。',p.feedback.some(f=>f.note)?'explicit':'tentative'),item('plot','可能偏好逐步推进关系，避免过快跨越发展阶段。','tentative'),item('expression','可能偏好简短对白和具体动作描写，减少空泛抒情。','tentative')]});
+    return JSON.stringify({summary:'模拟结果：结合新评价修订整份偏好；剧情及文笔为间接推测，自动生效。此处为预设演示，不是真实模型推断。',categoryReports:{interaction:{status:'updated',reason:'模拟：按短评调整角色表达关心的方式。'},plot:{status:'updated',reason:'模拟推测：高评分回复推进较克制，结合新评价持续修订。'},expression:{status:'updated',reason:'模拟推测：回复以简短对白和动作呈现关心，自动应用克制的表达偏好。'}},items:[item('interaction','通过行动表达关心，保持原角色慢热、克制的表达习惯。',p.feedback.some(f=>f.note)?'explicit':'tentative'),item('plot','可能偏好逐步推进关系，避免过快跨越发展阶段。','tentative'),item('expression','可能偏好简短对白和具体动作描写，减少空泛抒情。','tentative')]});
 }};
 window.SillyTavern={getContext:()=>({...ctx})};
 function draw(){const chat=document.querySelector('#chat');chat.replaceChildren(...ctx.chat.map((m,i)=>{const floor=document.createElement('div');floor.className='mes';floor.setAttribute('mesid',i);const block=document.createElement('div');block.className='mes_block';const title=document.createElement('b');title.textContent=m.is_user?'你':'沈砚';const content=document.createElement('p');content.style.whiteSpace='pre-wrap';content.textContent=m.mes;block.append(title,content);floor.append(block);return floor}))}
 document.querySelector('#theme').onclick=()=>document.body.classList.toggle('light');
 document.querySelector('#swipe').onclick=()=>{const m=ctx.chat[1];m.swipe_id=m.swipe_id===0?1:0;m.mes=m.swipe_id===0?'他将围巾放在你身旁，没有多说。':'他走到柜子前，拿出围巾递给你。“天冷，别忘了。”';draw();eventSource.emit('MESSAGE_SWIPED')};
 document.querySelector('#switch').onclick=()=>{selected=1-selected;const save=chats[selected];Object.assign(ctx,{chatId:save.id,chat:save.chat,chatMetadata:save.metadata});draw();eventSource.emit('CHAT_CHANGED')};
-draw();await import('/index.js');document.querySelector('.rpp-drawer').open=true;document.querySelector('.rpp-feedback').open=true;
+draw();await import('/scripts/extensions/third-party/Mweo-Correction-Center/index.js');document.querySelector('.rpp-drawer').open=true;document.querySelector('.rpp-feedback').open=true;
 // Exercise a long save with pagination: only floors 995..999 are mounted.
 const longSave=document.createElement('button');longSave.className='menu_button';longSave.textContent='浏览第 997 楼（共 999 楼）';
 document.querySelector('#fixture-controls').append(longSave);

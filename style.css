@@ -20,7 +20,14 @@
 .rpp-title .rpp-chevron { margin-left: auto; width: 18px; height: 18px; padding: 3px; border-radius: 50%; background: var(--rpp-text); color: var(--SmartThemeBlurTintColor, Canvas); }
 .rpp-drawer[open] .rpp-chevron { transform: rotate(180deg); }
 .rpp-panel summary, .rpp-feedback summary, .rpp-floating-window summary { cursor: pointer; min-height: 44px; align-content: center; }
-.rpp-body { padding: 4px 0; display: flex; flex-direction: column; gap: 8px; }
+.rpp-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--rpp-rule); border-radius: 0 0 10px 10px; background: var(--SmartThemeBlurTintColor, #202126); backdrop-filter: blur(12px); }
+.rpp-intro { min-width: 0; }
+.rpp-credit { font-size: 12px; margin-top: 3px !important; color: var(--rpp-accent); }
+.rpp-update-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 8px; background: var(--rpp-inset); }
+.rpp-update-status { flex: 1 1 160px; font-size: 12px; }
+.rpp-update-bar .rpp-button { padding: 6px 10px; font-size: 12px; }
+.rpp-repository-link { font-size: 12px; color: var(--rpp-accent); padding: 8px 0; }
+.rpp-update-notice { font-size: 10px; padding: 1px 6px; border-radius: 8px; color: var(--rpp-accent); background: var(--rpp-wash); }
 .rpp-body p, .rpp-feedback p { margin: 0; }
 .rpp-help { font-size: 13px; }
 .rpp-check { display: flex; gap: 8px; align-items: center; min-height: 44px; cursor: pointer; }
@@ -46,8 +53,11 @@
 .rpp-error { color: var(--rpp-text); border-left: 3px solid #df7676; padding-left: 10px; font-weight: 600; }
 .rpp-section { border-top: 1px solid var(--rpp-border); padding-top: 8px; }
 .rpp-profile-list { display: flex; flex-direction: column; gap: 12px; margin: 8px 0 12px; }
-.rpp-item { border-bottom: 1px solid var(--rpp-rule); padding: 12px 0; }
-.rpp-item-title { font-weight: 600; }
+.rpp-item { border: 1px solid var(--rpp-rule); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--rpp-inset); }
+.rpp-item-title { font-weight: 600; font-size: 12px; color: var(--rpp-accent); }
+.rpp-item-text { white-space: pre-wrap; line-height: 1.75; }
+.rpp-item-edit { border-top: 1px solid var(--rpp-rule); padding-top: 4px; }
+.rpp-item-edit > summary { font-size: 12px; }
 .rpp-analysis-summary { padding: 8px 0; }
 .rpp-feedback { margin-top: 12px; border-top: 1px solid var(--rpp-border); }
 .rpp-feedback > summary { font-size: 13px; }

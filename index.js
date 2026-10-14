@@ -1,6 +1,7 @@
 import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeedback, revisionOf, eligible, usableItems, sourcesActive, feedbackKey } from './core.js';
 import { createController } from './controller.js';
 import { callAnalyzer } from './api.js';
+import { VERSION, CREDIT, REPOSITORY, createUpdateManager } from './updates.js';
 
 let controller, panel, workbench, home, status, profileList, stats, preview, sessionApiKey = '', observer;
 let floatingButton, floatingWindow, floatingFeedback, floatingHeading, floatingPreview, floatingStatus, renderedMetadata, focusedFloor;
@@ -21,6 +22,7 @@ let fieldCounter = 0;
 let nativeHostState;
 let mainTabs, recordsList, activePage = 'overview';
 let automaticOptions, analysisModeHelp, bulkAnalysisHelp;
+let updater, updateStatus, updateNotice, checkUpdateButton, installUpdateButton, reloadButton;
 const pages = {};
 const MAIN_TABS = { overview: ['概览', 'book'], settings: ['设置', 'sliders'], prompts: ['提示词', 'pen'], records: ['记录', 'archive'] };
 
@@ -122,13 +124,24 @@ function settingInput(label, key, type = 'text', min, max) {
     return field(label, input);
 }
 
+function renderUpdate(state) {
+    if (!updateStatus) return;
+    updateStatus.textContent = state.message;
+    updateNotice.hidden = !state.available && !state.reload;
+    updateNotice.textContent = state.reload ? '待刷新' : '有更新';
+    checkUpdateButton.disabled = state.busy || state.reload;
+    installUpdateButton.hidden = !state.available; installUpdateButton.disabled = state.busy;
+    reloadButton.hidden = !state.reload;
+}
+
 function mountPanel() {
     const target = document.querySelector('#extensions_settings2') ?? document.querySelector('#extensions_settings');
     if (!target) return false;
     panel = el('section', 'rpp-panel'); panel.id = 'rpp-panel';
     const drawer = el('details', 'rpp-drawer');
     const title = el('summary', 'rpp-title standoutHeader'); const chevron = icon('chevron'); chevron.classList.add('rpp-chevron');
-    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', 'v0.6.0'), chevron); drawer.append(title);
+    updateNotice = el('small', 'rpp-update-notice'); updateNotice.hidden = true;
+    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', `v${VERSION}`), updateNotice, chevron); drawer.append(title);
     const body = el('div', 'rpp-body');
     const entranceField = el('fieldset', 'rpp-entrance'); entranceField.append(el('legend', '', '反馈入口（二选一）'));
     for (const [value, label] of [['floors', '楼层反馈'], ['floating', '悬浮球']]) {
@@ -142,7 +155,17 @@ function mountPanel() {
     const topline = el('div', 'rpp-topline');
     const master = checkbox('启用', controller.settings().enabled, value => saveSetting('enabled', value)); master.classList.add('rpp-switch');
     const masterInput = master.querySelector('input'); master.replaceChildren(el('span', '', '启用'), masterInput, el('span', 'rpp-switch-track'));
-    topline.append(el('p', 'rpp-tagline', '听见偏好，让故事更合心意。'), master); workbench.append(topline);
+    const intro = el('div', 'rpp-intro'); intro.append(el('p', 'rpp-tagline', '听见偏好，让故事更合心意。'), el('p', 'rpp-credit', CREDIT));
+    topline.append(intro, master); workbench.append(topline);
+    const updateBar = el('div', 'rpp-update-bar');
+    updateStatus = el('p', 'rpp-update-status'); updateStatus.setAttribute('role', 'status');
+    checkUpdateButton = button('检查更新', () => updater.check());
+    installUpdateButton = button('立即更新', () => { if (controller.busy) throw new Error('请等待当前分析完成后更新。'); return updater.install(); }, true);
+    reloadButton = button('刷新生效', () => { if (controller.busy) throw new Error('请等待当前分析完成后刷新。'); window.location.reload(); });
+    const repositoryLink = el('a', 'rpp-repository-link', '更新说明'); repositoryLink.href = REPOSITORY; repositoryLink.target = '_blank'; repositoryLink.rel = 'noopener noreferrer';
+    updateBar.append(updateStatus, checkUpdateButton, installUpdateButton, reloadButton, repositoryLink); workbench.append(updateBar);
+    updater = createUpdateManager({ moduleUrl: import.meta.url, getContext: () => controller.context(), changed: renderUpdate }); renderUpdate(updater.state);
+    void updater.check();
     mainTabs = el('div', 'rpp-main-tabs'); mainTabs.setAttribute('role', 'tablist'); mainTabs.setAttribute('aria-label', '喵喵修正中心');
     for (const [key, [label, glyph]] of Object.entries(MAIN_TABS)) {
         const tab = navigationTab(() => choosePage(key)); tab.classList.add('rpp-main-tab'); tab.id = `rpp-main-${key}`; tab.dataset.page = key;
@@ -179,7 +202,7 @@ function mountPanel() {
     pages.overview.append(feedbackSection);
     bulkAnalysisHelp = el('p', 'rpp-help'); feedbackSection.append(bulkAnalysisHelp);
     const profileSection = el('section', 'rpp-step'); profileSection.id = 'rpp-profile-step'; profileSection.append(el('h3', 'rpp-step-title', '当前档偏好补充'));
-    profileSection.append(el('p', 'rpp-help', '一次分析整理三类偏好。待确认条目保存启用后才会注入。'));
+    profileSection.append(el('p', 'rpp-help', '三类补充自动生效，无需确认。你可以随时手动编辑，下一轮继续修订。'));
     const chatSwitch = checkbox('应用当前存档的偏好补充', true, value => perform(() => controller.setChatEnabled(value)));
     chatSwitch.querySelector('input').id = 'rpp-chat-enabled'; profileSection.append(chatSwitch);
     categoryTabs = el('div', 'rpp-category-tabs'); categoryTabs.setAttribute('role', 'tablist'); categoryTabs.setAttribute('aria-label', '三类偏好');
@@ -275,28 +298,28 @@ function renderProfile() {
     for (const tab of categoryTabs.querySelectorAll('[role=tab]')) {
         const key = tab.dataset.category, group = state.profile.filter(item => item.category === key);
         const enabled = group.filter(item => usable.includes(item)).length;
-        const candidates = group.filter(item => !item.enabled && item.confidence === 'tentative').length;
-        tab.replaceChildren(el('span', '', CATEGORY_UI[key].title), el('small', '', `${enabled} 启用 · ${candidates} 待确认`));
+        tab.replaceChildren(el('span', '', CATEGORY_UI[key].title), el('small', '', `${enabled} 条生效`));
     }
     const content = [];
     if (!state.profile.some(item => item.category === activeCategory)) content.push(el('p', 'rpp-empty', `还没有${CATEGORY_UI[activeCategory].title}补充。分析后会归入这里，也可以手动添加。`));
     for (const item of state.profile.filter(item => item.category === activeCategory)) {
         const row = el('article', 'rpp-item');
         const stale = !sourcesActive(item, ctx.chat);
-        const confidence = { explicit: '明确反馈', repeated: '多次支持', tentative: '待确认推测', manual: '用户确认' }[item.confidence];
-        row.append(el('p', 'rpp-item-title', `${stale ? '已失效' : item.enabled ? '已启用' : item.confidence === 'tentative' ? '待确认' : '已停用'} · ${confidence}${stale ? ' · 来源回复已变化' : ''}`));
+        const confidence = { explicit: '明确反馈', repeated: '多次支持', tentative: '推测', manual: '手动编辑' }[item.confidence];
+        row.append(el('p', 'rpp-item-title', `${stale ? '来源已变化' : item.enabled ? '已生效' : '已停用'} · ${confidence}`), el('p', 'rpp-item-text', item.text));
+        const editDetails = el('details', 'rpp-item-edit'); editDetails.append(el('summary', '', '手动编辑'));
         const input = el('textarea', 'text_pole'); input.rows = 3; input.maxLength = 500;
         const draft = itemDrafts.get(item.id) ?? { text: item.text, enabled: item.enabled };
         input.value = draft.text;
         input.addEventListener('input', () => { draft.text = input.value; itemDrafts.set(item.id, draft); });
-        row.append(field('偏好补充内容', input));
-        row.append(checkbox('启用这条补充', draft.enabled, value => { draft.enabled = value; itemDrafts.set(item.id, draft); }));
+        editDetails.append(field('偏好补充内容', input));
+        editDetails.append(checkbox('应用此条补充', draft.enabled, value => { draft.enabled = value; itemDrafts.set(item.id, draft); }));
         const sources = item.sourceIds.map(id => valid.find(f => f.id === id)).filter(Boolean).map(f => `第 ${f.index} 层`).join('、');
         row.append(el('p', 'rpp-help', item.manual ? '你保存的修改会交给下一轮分析，AI 可结合新评价保留、改写或删除。' : `反馈来源：${sources || (item.userAnchored ? '上一版用户补充' : '原回复版本已变化')}。此条会参与后续整份修正。`));
         const actions = el('div', 'rpp-actions');
         const save = button('保存修改', async () => { await controller.editItem(item.id, input.value, draft.enabled); itemDrafts.delete(item.id); renderProfile(); });
         const remove = button('删除', async () => { await controller.deleteItem(item.id); itemDrafts.delete(item.id); });
-        save.disabled = remove.disabled = controller.busy; actions.append(save, remove); row.append(actions); content.push(row);
+        save.disabled = remove.disabled = controller.busy; actions.append(save, remove); editDetails.append(actions); row.append(editDetails); content.push(row);
     }
     profileList.replaceChildren(...content);
     preview.value = controller.inject() || '当前没有注入偏好补充。';
@@ -485,8 +508,7 @@ function renderCharacterSupplement() {
     block.querySelector('button').disabled = !current;
     if (!current) { name.textContent = '尚未打开此角色的单人聊天存档'; text.value = '打开对应存档后，这里会显示该存档的角色相处补充。'; return; }
     const state = controller.state(), items = usableItems(ctx.chat, state).filter(item => item.category === 'interaction');
-    const candidates = state.profile.filter(item => item.category === 'interaction' && !item.enabled).length;
-    name.textContent = `${ctx.chatId ?? ctx.getCurrentChatId()} · ${items.length} 条已启用${candidates ? ` · ${candidates} 条待确认（见偏好面板）` : ''}${state.enabled ? '' : ' · 当前暂停注入'}`;
+    name.textContent = `${ctx.chatId ?? ctx.getCurrentChatId()} · ${items.length} 条生效${state.enabled ? '' : ' · 当前暂停注入'}`;
     text.value = items.map(item => item.text).join('\n\n') || '此档还没有已启用的角色相处补充。可通过反馈分析，或在偏好面板手动添加。';
 }
 
@@ -556,7 +578,10 @@ export function initialize() {
     on('GENERATION_STARTED', (...args) => controller.generationStarted(...args));
     on('GENERATION_ENDED', () => controller.generationEnded());
     on('GENERATION_STOPPED', () => controller.generationEnded());
-    for (const name of ['CHAT_CHANGED', 'CHAT_LOADED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_DELETED', 'MESSAGE_SWIPE_DELETED', 'CHARACTER_MESSAGE_RENDERED', 'MORE_MESSAGES_LOADED']) on(name, () => controller.refresh());
+    for (const name of ['CHAT_CHANGED', 'CHAT_LOADED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_DELETED', 'MESSAGE_SWIPE_DELETED', 'CHARACTER_MESSAGE_RENDERED', 'MORE_MESSAGES_LOADED']) on(name, () => {
+        controller.refresh();
+        if (name === 'CHAT_CHANGED' || name === 'CHAT_LOADED') controller.scheduleAuto();
+    });
     on('CHAT_COMPLETION_PROMPT_READY', () => controller.inject());
     for (const name of ['CHARACTER_PAGE_LOADED', 'CHARACTER_EDITOR_OPENED', 'CHARACTER_EDITED']) on(name, () => controller.refresh());
     observer = new MutationObserver(records => {
@@ -567,13 +592,13 @@ export function initialize() {
     window.addEventListener('resize', viewportChanged);
     document.addEventListener('scroll', viewportChanged, true);
     document.addEventListener('click', focusReadingFloor);
-    observer.observe(document.body, { childList: true, subtree: true }); controller.refresh();
+    observer.observe(document.body, { childList: true, subtree: true }); controller.refresh(); controller.scheduleAuto();
     // Version adaptation: getContext is preferred; legacy hosts export the live flag here.
     import('/script.js').then(module => { nativeHostState = module; }).catch(() => {});
 }
 
 export function onDisable() {
-    controller?.dispose(); observer?.disconnect(); clearTimeout(renderTimer);
+    controller?.dispose(); updater?.dispose(); observer?.disconnect(); clearTimeout(renderTimer);
     const ctx = controller?.context();
     for (const [type, handler] of subscriptions) ctx?.eventSource.removeListener(type, handler);
     subscriptions.length = 0;
@@ -585,6 +610,7 @@ export function onDisable() {
     clearTimeout(visibleFloorTimer);
     document.querySelectorAll('.rpp-feedback, #rpp-panel, #rpp-floating-button, #rpp-floating-window, #rpp-character-supplement').forEach(node => node.remove());
     panel = null; floatingButton = null; floatingWindow = null; floatingFeedback = null; floatingStatus = null; focusedFloor = null; controller = null; itemDrafts.clear(); manualDrafts.clear(); renderedMetadata = null;
+    updater = null; updateStatus = null;
 }
 
 export const onEnable = initialize;

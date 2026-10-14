@@ -2,10 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { KEY } from '../core.js';
+import { VERSION } from '../updates.js';
 
-test('实际插件界面：反馈保存、分析、候选确认、切换存档、无 HTML 注入、停用重启', async () => {
+test('实际插件界面：自动生效、可选编辑、署名与更新提示、切换存档、停用重启', async () => {
     const dom = new JSDOM('<!doctype html><body><div id="extensions_settings2"></div><div id="chat"></div><form id="character-form"><div id="descriptionWrapper"><textarea id="description_textarea" name="description">原角色描述</textarea></div><div id="firstMessageWrapper"><div id="first_message_div">开场白</div><textarea id="firstmessage_textarea" name="first_mes">原开场白</textarea></div><input id="avatar_url_pole" type="hidden" value="test.png"></form></body>', { url: 'http://localhost/' });
     for (const name of ['window', 'document', 'MutationObserver']) globalThis[name] = dom.window[name];
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ version: VERSION }) });
     const handlers = new Map();
     const eventTypes = Object.fromEntries(['APP_READY', 'GENERATION_STARTED', 'GENERATION_ENDED', 'GENERATION_STOPPED', 'CHAT_CHANGED', 'CHARACTER_MESSAGE_RENDERED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED'].map(name => [name, name]));
     const eventSource = {
@@ -86,8 +89,13 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     document.querySelector('#rpp-tab-plot').click();
     assert.equal(document.querySelector('#rpp-tab-interaction').classList.contains('rpp-is-active'), false);
     assert.equal(document.querySelector('#rpp-tab-plot').classList.contains('rpp-is-active'), true);
-    assert.equal(calls, 1); assert.match(document.querySelector('.rpp-item-title').textContent, /待确认/);
-    assert.equal(ctx.prompt, '');
+    assert.equal(calls, 1); assert.match(document.querySelector('.rpp-item-title').textContent, /已生效.*推测/);
+    assert.match(ctx.prompt, /放慢剧情/);
+    assert.equal(document.querySelector('.rpp-item-edit').open, false);
+    assert.match(document.querySelector('.rpp-credit').textContent, /by-NUE-喵喵电波/);
+    assert.match(document.querySelector('.rpp-version').textContent, new RegExp(VERSION.replaceAll('.', '\\.')));
+    assert.equal(document.querySelector('.rpp-update-status').textContent, '暂无新版本');
+    assert.doesNotMatch(document.querySelector('#rpp-profile-step').textContent, /待确认/);
     assert.equal(document.querySelectorAll('.rpp-analysis-summary img').length, 0);
     const enabled = document.querySelector('.rpp-item input'); enabled.checked = true; enabled.dispatchEvent(new window.Event('change'));
     findButton('保存修改').click(); await tick(); assert.match(ctx.prompt, /放慢剧情/);
@@ -170,5 +178,5 @@ test('实际插件界面：反馈保存、分析、候选确认、切换存档�
     assert.equal(document.querySelector('#rpp-floating-button'), null);
     module.onEnable(); await tick(); assert.equal(document.querySelectorAll('#rpp-panel').length, 1);
     assert.equal(document.querySelectorAll('.rpp-main-tabs .rpp-is-active').length, 1);
-    module.onDisable(); dom.window.close();
+    module.onDisable(); globalThis.fetch = previousFetch; dom.window.close();
 });
