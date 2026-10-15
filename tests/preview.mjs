@@ -2,10 +2,11 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 const html = await readFile(new URL('./preview.html', import.meta.url));
-const allowed = new Set(['index.js', 'core.js', 'controller.js', 'api.js', 'updates.js', 'debug-config.js', 'style.css']);
+const allowed = new Set(['index.js', 'core.js', 'controller.js', 'api.js', 'updates.js', 'debug-config.js', 'text.js', 'style.css']);
 const server = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
-    if (pathname === '/fixture-update-manifest') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ version: '0.7.1' })); return; }
+    if (pathname === '/fixture-update-manifest') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ version: '0.7.2' })); return; }
+    if (pathname === '/scripts/extensions/regex/engine.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(`export const regex_placement={AI_OUTPUT:2}; export function getRegexedString(text, placement, options) { if(placement!==2 || !options.isPrompt) throw new Error('模拟正则参数错误'); return text.replace(/<snow>[\\s\\S]*?<\\/snow>/g,''); }`); return; }
     if (pathname === '/api/extensions/discover') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify([{name:'third-party/Mweo-Correction-Center',type:'local'}])); return; }
     if (pathname === '/api/extensions/update') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({isUpToDate:false,shortCommitHash:'fixture'})); return; }
     if (pathname === '/script.js') { res.setHeader('Content-Type', 'text/javascript; charset=utf-8'); res.end('export const isGenerating = () => false;'); return; }

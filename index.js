@@ -1,8 +1,9 @@
-import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeedback, revisionOf, eligible, usableItems, sourcesActive, feedbackKey } from './core.js';
+import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeedback, revisionOf, eligible, usableItems, sourcesActive, feedbackKey, presentProfile } from './core.js';
 import { createController } from './controller.js';
 import { callAnalyzer } from './api.js';
 import { VERSION, CREDIT, REPOSITORY, createUpdateManager } from './updates.js';
 import { DEBUG_ENABLED } from './debug-config.js';
+import { prepareRegexText } from './text.js';
 
 let controller, panel, workbench, home, status, profileList, stats, preview, sessionApiKey = '', observer;
 let floatingButton, floatingWindow, floatingFeedback, floatingHeading, floatingPreview, floatingStatus, renderedMetadata, focusedFloor;
@@ -15,6 +16,9 @@ const CATEGORY_UI = {
 };
 const feedbackDrafts = new WeakMap();
 const floorBindings = new WeakMap();
+const feedbackViews = new WeakMap();
+const expandedItems = new Set();
+const expandedEdits = new Set();
 const itemDrafts = new Map();
 const manualDrafts = new Map();
 const subscriptions = [];
@@ -25,6 +29,7 @@ let mainTabs, recordsList, activePage = 'overview';
 let automaticOptions, analysisModeHelp, bulkAnalysisHelp;
 let updater, updateStatus, updateNotice, checkUpdateButton, installUpdateButton, reloadButton;
 let attemptDetails, attemptInfo, debugConsole, debugRecords;
+let profileUpdate;
 const pages = {};
 const MAIN_TABS = { overview: ['概览', 'book'], settings: ['设置', 'sliders'], prompts: ['提示词', 'pen'], records: ['记录', 'archive'] };
 
@@ -36,6 +41,8 @@ function icon(name) {
         archive: ['M4 7h16v13H4ZM3 3h18v4H3Z', 'M9 11h6'],
         cat: ['M5 8 4 3l6 3h4l6-3-1 5c4 8 0 13-7 13S1 16 5 8Z', 'M8 12h.1M16 12h.1M10 16l2 1 2-1M3 14l4 1M17 15l4-1'],
         chevron: ['m6 9 6 6 6-6'],
+        heart: ['M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z'],
+        star: ['m12 2 3.1 6.3L22 9.3l-5 4.9 1.2 6.8-6.2-3.2L5.8 21 7 14.2 2 9.3l6.9-1Z'],
     };
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
@@ -107,7 +114,7 @@ function select(options, value) {
     node.value = value ?? ''; return node;
 }
 function saveSetting(key, value) {
-    if (key !== 'feedbackMode') controller.cancel();
+    if (!['feedbackMode', 'ratingStyle'].includes(key)) controller.cancel();
     controller.settings()[key] = value;
     if (key === 'feedbackMode' && value !== 'floating') closeFloating(false);
     controller.context().saveSettingsDebounced(); controller.refresh();
@@ -193,7 +200,13 @@ function mountPanel() {
     automaticOptions.append(settingInput('每累计多少条新评价自动分析', 'threshold', 'number', 1, 20));
     automaticOptions.append(el('p', 'rpp-help', '累计 N 条就按提交顺序分析一批新评价。相同评价不会重复计数；新版修正整体替换旧版。'));
     analysisModeHelp = el('p', 'rpp-help');
-    pages.settings.append(entranceField, checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)), automaticOptions, analysisModeHelp);
+    const appearance = el('fieldset', 'rpp-entrance rpp-rating-style'); appearance.append(el('legend', '', '评分样式'));
+    for (const [value, label, glyph] of [['hearts', '爱心', 'heart'], ['stars', '星星', 'star'], ['numbers', '数字', null]]) {
+        const choice = el('label', 'rpp-entrance-choice'); const input = el('input'); input.type = 'radio'; input.name = 'rpp-rating-style'; input.value = value; input.checked = controller.settings().ratingStyle === value;
+        input.addEventListener('change', () => { if (input.checked) saveSetting('ratingStyle', value); });
+        choice.append(input); if (glyph) choice.append(icon(glyph)); choice.append(document.createTextNode(label)); appearance.append(choice);
+    }
+    pages.settings.append(entranceField, appearance, checkbox('累计反馈后自动分析', controller.settings().autoAnalyze, value => saveSetting('autoAnalyze', value)), automaticOptions, analysisModeHelp);
     const actions = el('div', 'rpp-actions');
     const cancel = button('取消本次应用', () => { controller.cancel(); announce('已取消本次应用。酒馆当前 API 请求可能仍需等待结束。'); }); cancel.id = 'rpp-cancel';
     actions.append(cancel); feedbackSection.append(actions);
@@ -236,13 +249,15 @@ function mountPanel() {
         categoryTabs.append(tab);
     }
     const categoryPanel = el('div', 'rpp-category-panel'); categoryPanel.id = 'rpp-category-panel'; categoryPanel.setAttribute('role', 'tabpanel');
-    categoryInfo = el('p', 'rpp-category-info'); categoryAssessment = el('p', 'rpp-category-assessment'); profileList = el('div', 'rpp-profile-list');
+    categoryInfo = el('p', 'rpp-category-info'); categoryAssessment = el('details', 'rpp-category-assessment');
+    categoryAssessment.append(el('summary', '', '本类分析说明'), el('p', 'rpp-assessment-text'));
+    profileUpdate = el('p', 'rpp-profile-update'); profileList = el('div', 'rpp-profile-list');
     manualDetails = el('details', 'rpp-manual'); manualDetails.append(el('summary', '', '手动添加偏好'));
     manualInput = el('textarea', 'text_pole'); manualInput.maxLength = 500; manualInput.rows = 3;
     manualInput.addEventListener('input', () => manualDrafts.set(activeCategory, manualInput.value));
     manualDetails.append(field('手动补充（保存后立即应用于当前存档）', manualInput));
     const add = button('保存手动补充', async () => { const category = activeCategory; await controller.addItem(category, manualInput.value); manualDrafts.delete(category); renderProfile(); }); add.dataset.mutation = 'true'; manualDetails.append(add);
-    categoryPanel.append(categoryInfo, categoryAssessment, profileList, manualDetails); profileSection.append(categoryTabs, categoryPanel);
+    categoryPanel.append(profileUpdate, categoryInfo, categoryAssessment, profileList, manualDetails); profileSection.append(categoryTabs, categoryPanel);
     const historyActions = el('div', 'rpp-actions');
     for (const [label, action] of [['撤销上次更新', () => controller.undo()], ['清空补充', () => controller.clearProfile()]]) {
         const control = button(label, action); control.dataset.mutation = 'true'; historyActions.append(control);
@@ -265,7 +280,7 @@ function mountPanel() {
     const key = el('input', 'text_pole'); key.type = 'password'; key.autocomplete = 'off'; key.placeholder = '仅保留在本次页面内存';
     key.addEventListener('input', () => { sessionApiKey = key.value; controller.cancel(); }); custom.append(field('API 密钥（可选）', key));
     custom.append(el('p', 'rpp-help', '独立 API 需支持浏览器跨域。密钥不会写入聊天、设置或导出文件，刷新后需重新填写。'));
-    config.append(custom, el('p', 'rpp-help', '每条新评价只携带对应楼层正文，并附原角色设定及上次分析结论。使用当前 API 时继承酒馆模型和回复长度；若 JSON 被截断，请提高回复长度。'));
+    config.append(custom, el('p', 'rpp-help', '每条新评价只携带对应楼层经过酒馆发送正则处理的正文，并附原角色设定及上次分析结论。纯显示正则不影响分析；过滤小剧场的规则需用于发送提示词。使用当前 API 时继承酒馆模型和回复长度；若 JSON 被截断，请提高回复长度。'));
     pages.settings.append(config); pages.prompts.append(settingsSection);
     choosePage(activePage);
     drawer.append(body); panel.append(drawer); target.append(panel); return true;
@@ -278,8 +293,9 @@ function renderDebug() {
     const nodes = [...history].reverse().map(batch => {
         const node = el('details', 'rpp-debug-batch'); node.open = batch === history.at(-1);
         const labels = {running:'分析中',applied:'已应用',failed:'未应用',cancelled:'已取消'};
-        node.append(el('summary', '', `${batch.startedAt} · ${batch.batchSize} 条评价 · ${labels[batch.status]}`));
+        node.append(el('summary', '', `${formatTime(batch.startedAt)} · ${batch.batchSize} 条评价 · ${labels[batch.status]}`));
         if (batch.error) node.append(el('p', 'rpp-error', batch.error));
+        if (!batch.requests.length && batch.status !== 'running') node.append(el('p', 'rpp-help', '本批尚未发送 API 请求，没有 AI 返回。'));
         batch.requests.forEach((request, index) => {
             const record = el('section', 'rpp-debug-record'); record.append(el('h4', '', `${index + 1} · ${request.label}`));
             if (request.error || request.validationError) record.append(el('p', 'rpp-error', request.validationError || request.error));
@@ -314,6 +330,8 @@ function renderProfile() {
         return;
     }
     const state = controller.state(), valid = activeFeedback(ctx.chat), usable = usableItems(ctx.chat, state);
+    const itemIds = new Set(state.profile.map(item => item.id));
+    for (const opened of [expandedItems, expandedEdits]) for (const id of opened) if (!itemIds.has(id)) opened.delete(id);
     const processed = new Set(state.consumed);
     recordsList.replaceChildren(...(valid.length ? [...valid].reverse().map(feedback => {
         const label = processed.has(feedbackKey(feedback)) || processed.has(feedback.id) ? '已处理' : '待分析';
@@ -328,7 +346,10 @@ function renderProfile() {
     const report = state.categoryReports?.[activeCategory];
     categoryAssessment.hidden = !state.analyzedAt;
     const reportLabels = { updated: '本轮已更新', unchanged: '保留上次结论', insufficient: '本轮证据不足' };
-    categoryAssessment.textContent = report ? `${reportLabels[report.status]}：${report.reason}` : '旧版分析未记录这类偏好的判断说明；下次有新评价时会补齐。';
+    categoryAssessment.querySelector('.rpp-assessment-text').textContent = report ? `${reportLabels[report.status]}：${report.reason}` : '旧版分析未记录这类偏好的判断说明；下次有新评价时会补齐。';
+    const presented = presentProfile(state), changes = presented.changes;
+    profileUpdate.hidden = !state.analyzedAt;
+    profileUpdate.textContent = state.analyzedAt ? `最近分析 · ${formatTime(state.analyzedAt)}${changes ? ` · 新增 ${changes.added} / 修订 ${changes.revised} / 沿用 ${changes.retained} / 移除 ${changes.removed}` : ' · 旧版未记录逐条变化，下次分析后会显示'}` : '';
     const name = el('p', 'rpp-chat-label', `${ctx.characters[ctx.characterId].name} · 当前存档`);
     const saveName = el('p', 'rpp-save-name', String(ctx.chatId ?? ctx.getCurrentChatId()));
     const counts = el('div', 'rpp-counts');
@@ -341,16 +362,29 @@ function renderProfile() {
     for (const tab of categoryTabs.querySelectorAll('[role=tab]')) {
         const key = tab.dataset.category, group = state.profile.filter(item => item.category === key);
         const enabled = group.filter(item => usable.includes(item)).length;
-        tab.replaceChildren(el('span', '', CATEGORY_UI[key].title), el('small', '', `${enabled} 条生效`));
+        const changed = presented.items.filter(item => item.category === key && ['added','revised'].includes(item.changeKind)).length;
+        tab.replaceChildren(el('span', '', CATEGORY_UI[key].title), el('small', '', `${enabled} 条生效${changed ? ` · ${changed} 更新` : ''}`));
     }
     const content = [];
     if (!state.profile.some(item => item.category === activeCategory)) content.push(el('p', 'rpp-empty', `还没有${CATEGORY_UI[activeCategory].title}补充。分析后会归入这里，也可以手动添加。`));
-    for (const item of state.profile.filter(item => item.category === activeCategory)) {
-        const row = el('article', 'rpp-item');
+    const order = { added: 0, revised: 1, manual: 2, retained: 3 };
+    const items = presented.items.filter(item => item.category === activeCategory).sort((a, b) => (order[a.changeKind] ?? 4) - (order[b.changeKind] ?? 4) || String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')));
+    for (const item of items) {
+        const row = el('details', 'rpp-item'); row.open = expandedItems.has(item.id); row.dataset.itemId = item.id;
+        const disclosure = el('span', 'rpp-item-disclosure', row.open ? '收起详情' : '展开详情');
+        row.addEventListener('toggle', () => { if (!row.isConnected) return; disclosure.textContent = row.open ? '收起详情' : '展开详情'; if (row.open) expandedItems.add(item.id); else expandedItems.delete(item.id); });
         const stale = !sourcesActive(item, ctx.chat);
         const confidence = { explicit: '明确反馈', repeated: '多次支持', tentative: '推测', manual: '手动编辑' }[item.confidence];
-        row.append(el('p', 'rpp-item-title', `${stale ? '来源已变化' : item.enabled ? '已生效' : '已停用'} · ${confidence}`), el('p', 'rpp-item-text', item.text));
-        const editDetails = el('details', 'rpp-item-edit'); editDetails.append(el('summary', '', '手动编辑'));
+        const heading = el('summary', 'rpp-item-heading');
+        const badges = el('span', 'rpp-item-meta');
+        const labels = {added:'本轮新增',revised:'本轮修订',retained:'沿用',manual:'手动编辑'};
+        if (labels[item.changeKind]) badges.append(el('span', `rpp-change-badge rpp-change-${item.changeKind}`, labels[item.changeKind]));
+        badges.append(el('span', 'rpp-item-title', `${stale ? '来源已变化' : item.enabled && state.enabled && controller.settings().enabled ? '已生效' : item.enabled ? '暂停注入' : '已停用'} · ${confidence}`));
+        heading.append(badges, el('span', 'rpp-item-snippet', item.text), disclosure); row.append(heading);
+        const body = el('div', 'rpp-item-body'); body.append(el('p', 'rpp-item-text', item.text));
+        if (item.updatedAt) body.append(el('p', 'rpp-help', `内容更新于 ${formatTime(item.updatedAt)}`));
+        const editDetails = el('details', 'rpp-item-edit'); editDetails.open = expandedEdits.has(item.id); editDetails.append(el('summary', '', '手动编辑'));
+        editDetails.addEventListener('toggle', () => { if (!editDetails.isConnected) return; if (editDetails.open) expandedEdits.add(item.id); else expandedEdits.delete(item.id); });
         const input = el('textarea', 'text_pole'); input.rows = 3; input.maxLength = 500;
         const draft = itemDrafts.get(item.id) ?? { text: item.text, enabled: item.enabled };
         input.value = draft.text;
@@ -358,14 +392,47 @@ function renderProfile() {
         editDetails.append(field('偏好补充内容', input));
         editDetails.append(checkbox('应用此条补充', draft.enabled, value => { draft.enabled = value; itemDrafts.set(item.id, draft); }));
         const sources = item.sourceIds.map(id => valid.find(f => f.id === id)).filter(Boolean).map(f => `第 ${f.index} 层`).join('、');
-        row.append(el('p', 'rpp-help', item.manual ? '你保存的修改会交给下一轮分析，AI 可结合新评价保留、改写或删除。' : `反馈来源：${sources || (item.userAnchored ? '上一版用户补充' : '原回复版本已变化')}。此条会参与后续整份修正。`));
+        body.append(el('p', 'rpp-help', item.manual ? '你保存的修改会交给下一轮分析，AI 可结合新评价保留、改写或删除。' : `反馈来源：${sources || (item.userAnchored ? '上一版用户补充' : '原回复版本已变化')}。此条会参与后续整份修正。`));
         const actions = el('div', 'rpp-actions');
         const save = button('保存修改', async () => { await controller.editItem(item.id, input.value, draft.enabled); itemDrafts.delete(item.id); renderProfile(); });
         const remove = button('删除', async () => { await controller.deleteItem(item.id); itemDrafts.delete(item.id); });
-        save.disabled = remove.disabled = controller.busy; actions.append(save, remove); editDetails.append(actions); row.append(editDetails); content.push(row);
+        save.disabled = remove.disabled = controller.busy; actions.append(save, remove); editDetails.append(actions); body.append(editDetails); row.append(body); content.push(row);
     }
     profileList.replaceChildren(...content);
     preview.value = controller.inject() || '当前没有注入偏好补充。';
+}
+
+function formatTime(value) { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
+
+function ratingControl(label, value, onChange) {
+    const style = controller.settings().ratingStyle;
+    const wrapper = el('fieldset', 'rpp-rating'); wrapper.append(el('legend', '', label));
+    const group = el('div', 'rpp-heart-row'); group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', label);
+    const meanings = ['未评分', '不满意', '不太满意', '一般', '满意', '很满意'];
+    const caption = el('span', 'rpp-rating-caption'); caption.setAttribute('aria-live', 'polite');
+    const buttons = [];
+    let selected = Number(value) || 0;
+    function paint() {
+        caption.textContent = selected ? `${selected} 分 · ${meanings[selected]}` : '未评分';
+        buttons.forEach((node, index) => { const n = index + 1; node.setAttribute('aria-checked', String(n === selected)); node.classList.toggle('rpp-rating-filled', n <= selected); node.tabIndex = n === (selected || 1) ? 0 : -1; });
+    }
+    function choose(n) { selected = n; paint(); onChange(n || ''); }
+    for (let n = 1; n <= 5; n++) {
+        const node = el('button', `rpp-rating-button${style === 'numbers' ? ' rpp-rating-number' : ''}`); node.type = 'button'; node.setAttribute('role', 'radio'); node.setAttribute('aria-label', `${n} 分 · ${meanings[n]}`); node.title = `${n} 分 · ${meanings[n]}`;
+        node.append(style === 'numbers' ? document.createTextNode(String(n)) : icon(style === 'stars' ? 'star' : 'heart'));
+        node.addEventListener('click', event => { event.stopPropagation(); choose(n); });
+        node.addEventListener('keydown', event => {
+            if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key)) return;
+            event.preventDefault(); event.stopPropagation();
+            const next = event.key === 'Home' ? 1 : event.key === 'End' ? 5 : Math.max(1, Math.min(5, n + (['ArrowLeft','ArrowDown'].includes(event.key) ? -1 : 1)));
+            choose(next); buttons[next - 1].focus();
+        });
+        buttons.push(node); group.append(node);
+    }
+    const meta = el('div', 'rpp-rating-meta');
+    const clear = el('button', 'rpp-rating-clear', '清除'); clear.type = 'button'; clear.setAttribute('aria-label', `清除${label}评分`);
+    clear.addEventListener('click', event => { event.stopPropagation(); choose(0); });
+    meta.append(caption, clear); wrapper.append(group, meta); paint(); return wrapper;
 }
 
 function createFeedbackRow(message, index, chat) {
@@ -373,28 +440,37 @@ function createFeedbackRow(message, index, chat) {
     const details = el('details', 'rpp-feedback'); details.dataset.revision = revision;
     details.dataset.feedback = feedback?.id ?? ''; details.dataset.index = index;
     details.dataset.feedbackKey = feedback ? feedbackKey(feedback) : '';
-    details.append(el('summary', '', feedback ? `反馈已保存 · 剧情 ${feedback.plot ?? '—'} / 角色 ${feedback.character ?? '—'}` : '反馈 · 剧情与角色表现'));
+    details.dataset.ratingStyle = controller.settings().ratingStyle;
+    const summary = el('summary'); details.append(summary);
     const form = el('form', 'rpp-feedback-form');
     const stored = feedbackDrafts.get(message);
     const draft = stored?.revision === revision ? stored : { revision, plot: feedback?.plot ?? '', character: feedback?.character ?? '', note: feedback?.note ?? '' };
-    const choices = [['', '不评分'], ...[1, 2, 3, 4, 5].map(n => [String(n), `${n} 分${n === 1 ? ' · 不满意' : n === 5 ? ' · 很满意' : ''}`])];
+    const localStatus = el('p', 'rpp-help rpp-feedback-status'); localStatus.setAttribute('role', 'status');
+    let rowError = '';
+    function syncStatus() {
+        const dirty = Number(draft.plot || 0) !== Number(feedback?.plot || 0) || Number(draft.character || 0) !== Number(feedback?.character || 0) || draft.note.trim() !== (feedback?.note ?? '');
+        summary.textContent = dirty ? `反馈未保存 · 剧情 ${draft.plot || '—'} / 角色 ${draft.character || '—'}` : feedback ? `反馈已保存 · 剧情 ${feedback.plot ?? '—'} / 角色 ${feedback.character ?? '—'}` : '反馈 · 剧情与角色表现';
+        details.classList.toggle('rpp-feedback-dirty', dirty);
+        const processed = feedback && controller.state().consumed.includes(feedbackKey(feedback));
+        localStatus.textContent = rowError || (dirty ? '修改尚未保存，点击「保存反馈」后才会参与分析。' : feedback ? processed ? '已保存 · 此评价已分析；修改后可以再次保存。' : controller.settings().autoAnalyze ? '已保存 · 等待累计自动分析。' : '已保存 · 自动分析已暂停。' : '点击评分，也可以只写短评。保存后按设置自动累计分析。');
+        localStatus.classList.toggle('rpp-error', Boolean(rowError));
+    }
+    function changedDraft() { rowError = ''; feedbackDrafts.set(message, draft); syncStatus(); }
     const ratings = el('div', 'rpp-ratings');
     for (const [key, label] of [['plot', '剧情满意度'], ['character', '角色表现满意度']]) {
-        const input = select(choices, String(draft[key]));
-        input.addEventListener('change', () => { draft[key] = input.value; feedbackDrafts.set(message, draft); }); ratings.append(field(label, input));
+        ratings.append(ratingControl(label, draft[key], value => { draft[key] = value; changedDraft(); }));
     }
     const note = el('textarea', 'text_pole'); note.rows = 2; note.maxLength = 2000; note.value = draft.note;
     note.placeholder = '例如：喜欢克制的关心，但关系推进太快。';
-    note.addEventListener('input', () => { draft.note = note.value; feedbackDrafts.set(message, draft); });
+    note.addEventListener('input', () => { draft.note = note.value; changedDraft(); });
     form.append(ratings, field('希望如何调整（可只写短评）', note));
-    const localStatus = el('p', 'rpp-help'); localStatus.setAttribute('role', 'status');
     function checkVersion() {
         if (controller.context().chat !== chat || chat[index] !== message || revisionOf(message) !== revision) throw new Error('回复版本或聊天已变化，请重新展开反馈。');
     }
     async function submit() {
         try {
             checkVersion(); await controller.saveFeedback(index, draft); feedbackDrafts.delete(message);
-        } catch (error) { localStatus.textContent = error.message; localStatus.classList.add('rpp-error'); announce(error.message, true); }
+        } catch (error) { rowError = error.message; syncStatus(); announce(error.message, true); }
     }
     const actions = el('div', 'rpp-actions');
     const save = button('保存反馈', submit, true);
@@ -402,7 +478,7 @@ function createFeedbackRow(message, index, chat) {
     remove.hidden = !feedback;
     actions.append(save, remove); form.append(actions, localStatus);
     form.addEventListener('submit', event => { event.preventDefault(); perform(submit); });
-    details.append(form); return details;
+    details.append(form); feedbackViews.set(details, syncStatus); syncStatus(); return details;
 }
 
 function closeFloating(restoreFocus = true) {
@@ -430,6 +506,12 @@ function positionFloating() {
     const right = Math.max(8, Math.min(Number(saved?.right) || 18, Math.max(8, window.innerWidth - 64)));
     const bottom = Math.max(8, Math.min(Number(saved?.bottom) || 110, Math.max(8, window.innerHeight - 64)));
     floatingButton.style.right = `${right}px`; floatingButton.style.bottom = `${bottom}px`;
+    if (floatingWindow && window.visualViewport) {
+        const viewport = window.visualViewport;
+        const inset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+        floatingWindow.style.bottom = `calc(${16 + inset}px + env(safe-area-inset-bottom, 0px))`;
+        floatingWindow.style.maxHeight = `${Math.max(80, viewport.height - 32)}px`;
+    }
 }
 
 function mountFloating() {
@@ -509,12 +591,13 @@ function renderFloatingFeedback() {
     floatingPreview.textContent = String(message.mes).replace(/\s+/g, ' ').slice(0, 140);
     const old = floatingFeedback.querySelector('.rpp-feedback');
     const binding = old && floorBindings.get(old);
-    if (!old || binding?.chat !== ctx.chat || binding?.message !== message || old.dataset.revision !== revision || old.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || old.dataset.index !== String(index)) {
+    if (!old || binding?.chat !== ctx.chat || binding?.message !== message || old.dataset.revision !== revision || old.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || old.dataset.index !== String(index) || old.dataset.ratingStyle !== controller.settings().ratingStyle) {
         const row = createFeedbackRow(message, index, ctx.chat); row.open = true;
         floorBindings.set(row, { chat: ctx.chat, message }); floatingFeedback.replaceChildren(row);
         floatingStatus.textContent = '';
     }
     for (const input of floatingFeedback.querySelectorAll('button, select, textarea')) input.disabled = controller.busy;
+    feedbackViews.get(floatingFeedback.querySelector('.rpp-feedback'))?.();
     floatingWindow.querySelector('#rpp-floating-cancel').hidden = !controller.busy;
 }
 
@@ -564,7 +647,7 @@ function renderFloors() {
         if (!active || !eligible(message)) { existing?.remove(); continue; }
         const revision = revisionOf(message), feedback = currentFeedback(message);
         const binding = existing && floorBindings.get(existing);
-        if (!existing || binding?.chat !== ctx.chat || binding?.message !== message || existing.dataset.revision !== revision || existing.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || existing.dataset.index !== String(index)) {
+        if (!existing || binding?.chat !== ctx.chat || binding?.message !== message || existing.dataset.revision !== revision || existing.dataset.feedbackKey !== (feedback ? feedbackKey(feedback) : '') || existing.dataset.index !== String(index) || existing.dataset.ratingStyle !== controller.settings().ratingStyle) {
             const open = existing?.open ?? false;
             const next = createFeedbackRow(message, index, ctx.chat); next.open = open;
             floorBindings.set(next, { chat: ctx.chat, message });
@@ -573,13 +656,14 @@ function renderFloors() {
             existing = next;
         }
         for (const node of existing.querySelectorAll('button, select, textarea')) node.disabled = controller.busy;
+        feedbackViews.get(existing)?.();
     }
 }
 function render() {
     if (!controller) return;
     if (!panel && !mountPanel()) return;
     if (renderedMetadata !== controller.context().chatMetadata) {
-        renderedMetadata = controller.context().chatMetadata; itemDrafts.clear(); manualDrafts.clear();
+        renderedMetadata = controller.context().chatMetadata; itemDrafts.clear(); manualDrafts.clear(); expandedItems.clear(); expandedEdits.clear();
         announce(controller.busy ? '已切换存档，上一次分析不会跨档应用。' : '当前存档已就绪。');
     }
     mountFloating();
@@ -588,7 +672,8 @@ function render() {
     analysisModeHelp.textContent = settings.autoAnalyze ? `保存即可：每累计 ${settings.threshold} 条新评价自动修订整份补充，包含角色、剧情与文笔。` : '自动分析已暂停，保存的评价仍会保留，开启后再按累计数量分析。';
     const waiting = controller.supported(controller.context()) ? pendingFeedback(controller.context().chat, controller.state()).length : 0;
     bulkAnalysisHelp.textContent = `待分析 ${waiting} 条 / 累计 ${settings.threshold} 条自动触发。每轮用新评价及对应正文修订上一版全部补充，包括你手动编辑的内容。`;
-    if (controller.analysisAttempt?.status === 'failed') bulkAnalysisHelp.textContent = `本批已触发自动分析，但返回未通过校验或请求失败。${waiting} 条评价已保留，旧修正继续生效。可在“记录”查看诊断${DEBUG_ENABLED ? '或打开调试台查看 AI 原文' : ''}。`;
+    if (!settings.autoAnalyze) bulkAnalysisHelp.textContent = `自动分析已暂停 · 待分析 ${waiting} 条。保存评价后不会调用 API，开启自动分析后继续。`;
+    if (controller.analysisAttempt?.status === 'failed') bulkAnalysisHelp.textContent = `本批未应用：${controller.analysisAttempt.requestCount ? '返回未通过校验或请求失败' : '正文准备失败，尚未发送 API 请求'}。${waiting} 条评价已保留，旧修正继续生效。可在“记录”查看诊断${DEBUG_ENABLED ? '或打开调试台查看 AI 原文' : ''}。`;
     choosePage(activePage);
     const floating = controller.settings().feedbackMode === 'floating';
     floatingButton.hidden = !controller.settings().enabled || !floating;
@@ -609,7 +694,11 @@ export function initialize() {
         if (typeof nativeHostState?.isGenerating === 'function') return nativeHostState.isGenerating();
         return typeof nativeHostState?.is_send_press === 'boolean' ? nativeHostState.is_send_press : undefined;
     }, notify: announce, changed: render,
-        analyzer: (ctx, settings, prompt, options) => callAnalyzer(ctx, settings, prompt, { ...options, apiKey: options.apiKey || sessionApiKey }) });
+        analyzer: (ctx, settings, prompt, options) => callAnalyzer(ctx, settings, prompt, { ...options, apiKey: options.apiKey || sessionApiKey }),
+        prepareText: () => {
+            const ctx = controller.context();
+            return prepareRegexText(typeof ctx.getRegexedString === 'function' && ctx.regex_placement ? async () => ctx : undefined);
+        } });
     const settingsBeforeUpgrade = controller.settings();
     const upgradeAnalysis = !settingsBeforeUpgrade.analysisFlowVersion;
     Object.assign(controller.settings(), { ...DEFAULTS, ...settingsBeforeUpgrade });
@@ -634,6 +723,8 @@ export function initialize() {
     });
     window.addEventListener('resize', positionFloating);
     window.addEventListener('resize', viewportChanged);
+    window.visualViewport?.addEventListener('resize', positionFloating);
+    window.visualViewport?.addEventListener('scroll', positionFloating);
     document.addEventListener('scroll', viewportChanged, true);
     document.addEventListener('click', focusReadingFloor);
     observer.observe(document.body, { childList: true, subtree: true }); controller.refresh(); controller.scheduleAuto();
@@ -649,6 +740,8 @@ export function onDisable() {
     ctx?.setExtensionPrompt(KEY, '', 1, 0, false, 0);
     window.removeEventListener('resize', positionFloating);
     window.removeEventListener('resize', viewportChanged);
+    window.visualViewport?.removeEventListener('resize', positionFloating);
+    window.visualViewport?.removeEventListener('scroll', positionFloating);
     document.removeEventListener('scroll', viewportChanged, true);
     document.removeEventListener('click', focusReadingFloor);
     clearTimeout(visibleFloorTimer);

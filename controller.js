@@ -1,8 +1,8 @@
-import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems, feedbackKey, sameFeedback, migrateState, AnalysisValidationError } from './core.js';
+import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems, feedbackKey, sameFeedback, migrateState, AnalysisValidationError, profileEvolution } from './core.js';
 import { callAnalyzer } from './api.js';
 import { DEBUG_ENABLED } from './debug-config.js';
 
-export function createController({ getContext, isGenerating, notify = () => {}, changed = () => {}, analyzer = callAnalyzer }) {
+export function createController({ getContext, isGenerating, notify = () => {}, changed = () => {}, analyzer = callAnalyzer, prepareText }) {
     let busy = false, task = null, generationActive = false, sessionKey = '', disposed = false;
     const attempts = new WeakMap();
     const debugHistory = new WeakMap();
@@ -99,11 +99,11 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         const ctx = context(); ensureWritable(ctx);
         if (!settings().enabled) throw new Error('请先启用喵喵修正中心。');
         const originState = state(ctx), epoch = originState.epoch;
-        const input = analysisInput(ctx, originState, settings(), { automatic, feedbackIds });
+        let input = analysisInput(ctx, originState, settings(), { automatic, feedbackIds, deferTextProcessing: Boolean(prepareText) });
         const originChat = ctx.chat, originMetadata = ctx.chatMetadata, originKey = key(ctx);
         const pendingKeys = input.pending.map(feedbackKey);
         const run = { abort: new AbortController(), cancelled: false };
-        const attempt = { status: 'running', batchSize: input.pending.length, repairAttempts: 0, error: '', startedAt: new Date().toISOString(), requests: [] };
+        const attempt = { status: 'running', batchSize: input.pending.length, repairAttempts: 0, requestCount: 0, error: '', startedAt: new Date().toISOString(), requests: [] };
         attempts.set(originMetadata, attempt);
         if (DEBUG_ENABLED) debugHistory.set(originMetadata, [...(debugHistory.get(originMetadata) ?? []), attempt].slice(-10));
         busy = true; task = run; changed();
@@ -116,6 +116,7 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             return input.evidence.every(f => activeKeys.has(feedbackKey(f)));
         };
         const ask = async (prompt, label) => {
+            attempt.requestCount++;
             const entry = DEBUG_ENABLED ? { label, prompt, response: '', error: '', validationError: '' } : null;
             if (entry) { attempt.requests.push(entry); changed(); }
             try {
@@ -126,6 +127,11 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         };
         const timer = setTimeout(() => { run.cancelled = true; run.abort.abort(); notify('分析等待超过两分钟，结果将不再应用。请检查 API；反馈已保留。', true); }, 120000);
         try {
+            if (prepareText) {
+                const transformText = await prepareText();
+                if (!originUnchanged()) { attempt.status = 'cancelled'; return; }
+                input = analysisInput(ctx, originState, settings(), { automatic, feedbackIds, transformText });
+            }
             let raw = await ask(input.prompt, '首次分析');
             if (!originUnchanged()) {
                 attempt.status = 'cancelled'; notify('聊天或反馈已变化，本次结果未应用。反馈已保留，可以重新分析。'); return;
@@ -147,12 +153,15 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             const excluded = new Set(originState.dismissed ?? []);
             // B replaces A atomically, including entries the user edited. Omitted
             // entries are deleted; never append protected old entries to B.
-            originState.profile = result.items.filter(item => !excluded.has(`${item.category}\0${item.text}`));
+            const updatedAt = new Date().toISOString();
+            const evolution = profileEvolution(result.items.filter(item => !excluded.has(`${item.category}\0${item.text}`)), originState.profile, updatedAt, originState.analyzedAt);
+            originState.profile = evolution.items;
             originState.consumed = [...new Set([...originState.consumed, ...pendingKeys])];
             originState.summary = result.summary;
             originState.categoryReports = result.categoryReports;
-            originState.analyzedAt = new Date().toISOString(); originState.epoch++;
-            originState.lastAnalysis = { summary: result.summary, categoryReports: result.categoryReports, items: structuredClone(originState.profile), analyzedAt: originState.analyzedAt, newFeedbackKeys: pendingKeys };
+            originState.analyzedAt = updatedAt; originState.epoch++;
+            originState.lastAnalysis = { summary: result.summary, categoryReports: result.categoryReports, items: structuredClone(originState.profile), analyzedAt: originState.analyzedAt, newFeedbackKeys: pendingKeys,
+                changes: evolution.changes };
             try {
                 if (await ctx.saveChat() === false) throw new Error('聊天存档保存失败。');
             } catch (error) { Object.assign(originState, previous); throw error; }
@@ -163,7 +172,7 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         } catch (error) {
             attempt.status = run.cancelled ? 'cancelled' : 'failed'; attempt.error = error.message;
             if (DEBUG_ENABLED && error instanceof AnalysisValidationError && attempt.requests.length) attempt.requests.at(-1).validationError = error.message;
-            throw new Error(`自动分析已触发，但本批未应用：${error.message} 旧修正及 ${input.pending.length} 条评价已保留。`);
+            throw new Error(`${attempt.requestCount ? '自动分析已触发，但本批未应用' : '分析准备失败，本批未发送'}：${error.message} 旧修正及 ${input.pending.length} 条评价已保留。`);
         } finally { clearTimeout(timer); if (task === run) task = null; busy = false; refresh(); if ((didApply && automatic) || key(context()) !== originKey) scheduleAuto(); }
     }
     async function editItem(id, text, enabled) {
@@ -173,7 +182,7 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
             const item = data.profile.find(item => item.id === id);
             if (!item) throw new Error('补充已发生变化，请重新打开。');
             checkpoint(data);
-            Object.assign(item, { text: trimmed, enabled: Boolean(enabled), manual: true, confidence: 'manual' });
+            Object.assign(item, { text: trimmed, enabled: Boolean(enabled), manual: true, confidence: 'manual', changeKind: 'manual', updatedAt: new Date().toISOString() });
         }, '补充已保存为用户确认的偏好。');
     }
     async function deleteItem(id) {
@@ -191,7 +200,7 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         await transact((ctx, data) => {
             if (data.profile.length >= 18) throw new Error('当前补充已达 18 条，请先删除不需要的补充。');
             checkpoint(data);
-            data.profile.push({ id: uid(), category, text: trimmed, enabled: true, manual: true, confidence: 'manual', sourceIds: [] });
+            data.profile.push({ id: uid(), category, text: trimmed, enabled: true, manual: true, confidence: 'manual', sourceIds: [], changeKind: 'manual', updatedAt: new Date().toISOString() });
         }, '手动偏好已保存到当前存档。');
     }
     async function undo() {

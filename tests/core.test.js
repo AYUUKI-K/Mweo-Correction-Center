@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, currentFeedback, activeFeedback, buildInjection, parseResult, analysisInput, pendingFeedback, feedbackKey, migrateState } from '../core.js';
 import { createController } from '../controller.js';
 import { callAnalyzer, completionUrl } from '../api.js';
+import { prepareRegexText } from '../text.js';
+import { presentProfile } from '../core.js';
 
 function host() {
     const ctx = {
@@ -526,4 +528,94 @@ test('调试历史仅保留最近十批；API 请求异常也记录原因', asyn
     assert.equal(ctl.analysisDebug.at(-1).requests.length, 1);
     assert.equal(ctl.analysisDebug.at(-1).requests[0].error, '模拟 API 503');
     assert.equal(ctl.state().consumed.length, 0);
+});
+
+test('发送前用酒馆 AI_OUTPUT 正则处理对应楼层，深度排除系统楼层，原文及评分身份不变', async () => {
+    const h = host(), calls = [];
+    h.ctx.chat[1].mes = '主线正文<snow>独立小剧场 ABO</snow>';
+    h.ctx.chat.push({ is_system: true, mes: '系统消息' }, { is_user: true, mes: '后续用户' }, { mes: '后续回复' });
+    const original = h.ctx.chat[1].mes;
+    const ctl = createController({ getContext: () => h.ctx,
+        prepareText: () => prepareRegexText(async () => ({ regex_placement: { AI_OUTPUT: 2 }, getRegexedString(text, placement, options) {
+            calls.push({ placement, options }); return text.replace(/<snow>[\s\S]*?<\/snow>/g, '');
+        } })),
+        analyzer: async (ctx, settings, prompt) => {
+            const input = JSON.parse(prompt);
+            assert.deepEqual(input.transcript.map(item => item.text), ['主线正文']);
+            assert.equal(input.transcript[0].floor, 1);
+            assert.match(input.transcriptProcessing, /正则/);
+            return result(input.newFeedbackIds[0]);
+        },
+    });
+    await ctl.saveFeedback(1, { note: '只评价主线' }); const identity = feedbackKey(currentFeedback(h.ctx.chat[1]));
+    await ctl.analyze();
+    assert.deepEqual(calls, [{ placement: 2, options: { isPrompt: true, depth: 2 } }]);
+    assert.equal(h.ctx.chat[1].mes, original);
+    assert.deepEqual(ctl.state().consumed, [identity]);
+    assert.equal(JSON.parse(ctl.analysisDebug[0].requests[0].prompt).transcript[0].text, '主线正文');
+});
+
+test('正则加载失败或清空正文时不发送原文，不消费评价；超长小剧场过滤后允许发送', async () => {
+    const h = host(); let calls = 0, mode = 'failed';
+    h.ctx.chat[1].mes = '主线<snow>' + '小剧场'.repeat(32000) + '</snow>';
+    const ctl = createController({ getContext: () => h.ctx,
+        prepareText: () => prepareRegexText(async () => {
+            if (mode === 'failed') throw new Error('加载失败');
+            return { regex_placement: { AI_OUTPUT: 2 }, getRegexedString: text => mode === 'empty' ? '' : text.replace(/<snow>[\s\S]*?<\/snow>/g, '') };
+        }),
+        analyzer: async (ctx, settings, prompt) => { calls++; const input = JSON.parse(prompt); assert.equal(input.transcript[0].text, '主线'); return result(input.newFeedbackIds[0]); },
+    });
+    await ctl.addItem('expression', '已有补充'); await ctl.saveFeedback(1, { note: '只看主线' });
+    const before = structuredClone(ctl.state());
+    await assert.rejects(ctl.analyze(), /本批未发送.*无法加载/);
+    assert.equal(ctl.analysisAttempt.requestCount, 0);
+    mode = 'empty'; await assert.rejects(ctl.analyze(), /没有可分析正文/);
+    assert.equal(calls, 0); assert.deepEqual(ctl.state(), before);
+    mode = 'valid'; await ctl.analyze(); assert.equal(calls, 1); assert.equal(ctl.state().consumed.length, 1);
+});
+
+test('等待正则加载时切换存档，不能发送原存档正文', async () => {
+    const h = host(); let finish, calls = 0;
+    const ctl = createController({ getContext: () => current, prepareText: () => new Promise(resolve => { finish = resolve; }), analyzer: async () => { calls++; return '{}'; } });
+    let current = h.ctx;
+    await ctl.saveFeedback(1, { note: '偏好' });
+    const pending = ctl.analyze();
+    current = { ...h.ctx, chatId: 'b', chatMetadata: {}, chat: [] }; ctl.refresh();
+    finish(text => text); await pending;
+    assert.equal(calls, 0); assert.equal(h.ctx.chatMetadata[KEY].consumed.length, 0);
+});
+
+test('本轮新增、修订、沿用、移除可准确识别；失败与撤销保留变化记录', async () => {
+    const h = host(); let round = 0;
+    const ctl = h.make(async (ctx, settings, prompt) => {
+        const p = JSON.parse(prompt); round++;
+        const item = (text, previousItemIds = []) => ({ category: 'interaction', text, confidence: 'explicit', sourceIds: p.newFeedbackIds, previousItemIds });
+        return JSON.stringify({ summary: '更新偏好', categoryReports: reports, items: round === 1 ? [item('保留这条'), item('修订前'), item('待删除')] : [
+            item('保留这条', [p.previousAnalysis.items[0].id]), item('修订后', [p.previousAnalysis.items[1].id]), item('新增这条'),
+        ] });
+    });
+    await ctl.saveFeedback(1, { note: '初次评价' }); await ctl.analyze();
+    const first = structuredClone(ctl.state());
+    assert.deepEqual(first.lastAnalysis.changes, { added: 3, revised: 0, retained: 0, removed: 0 });
+    h.ctx.chat.push({is_user:true,mes:'下一轮'}, {mes:'新回复'});
+    await ctl.saveFeedback(3, { note: '修订评价' }); await ctl.analyze();
+    assert.deepEqual(ctl.state().lastAnalysis.changes, { added: 1, revised: 1, retained: 1, removed: 1 });
+    assert.deepEqual(ctl.state().profile.map(item => item.changeKind), ['retained','revised','added']);
+    assert.equal(ctl.state().profile[0].updatedAt, first.profile[0].updatedAt);
+    await ctl.undo(); assert.deepEqual(ctl.state().lastAnalysis, first.lastAnalysis);
+});
+
+test('旧版可用真实历史快照补出最新标记，缺少记录不猜测，不修改原偏好', () => {
+    const old = { id:'old',category:'plot',text:'旧偏好',sourceIds:[] };
+    const kept = { ...old, id:'kept', previousItemIds:['old'] };
+    const added = { id:'new',category:'plot',text:'新增偏好',sourceIds:[],previousItemIds:[] };
+    const state = { ...newState(), analyzedAt:'2026-10-15T12:00:00Z', profile:[kept,added], lastAnalysis:{items:[kept,added]}, history:[{profile:[old],analyzedAt:'2026-10-15T11:00:00Z'}] };
+    const before = structuredClone(state), presented = presentProfile(state);
+    assert.deepEqual(presented.items.map(item=>item.changeKind), ['retained','added']);
+    assert.deepEqual(presented.changes, {added:1,revised:0,retained:1,removed:0});
+    assert.equal(presented.items[0].updatedAt, undefined);
+    assert.deepEqual(state, before);
+    state.history = [];
+    assert.equal(presentProfile(state).changes, null);
+    assert.equal(presentProfile(state).items[1].changeKind, undefined);
 });

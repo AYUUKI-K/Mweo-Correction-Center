@@ -16,10 +16,11 @@ test('实际插件界面：自动生效、可选编辑、署名与更新提示�
         removeListener(name, handler) { handlers.set(name, handlers.get(name).filter(fn => fn !== handler)); },
         emit(name) { for (const handler of handlers.get(name) ?? []) handler(); },
     };
-    let calls = 0;
+    let calls = 0; const regexCalls = [];
     const ctx = {
         characters: [{ name: '角色', avatar: 'test.png', data: { personality: '慢热' } }], characterId: 0, chatId: 'a',
-        chat: [{ mes: '用户', is_user: true }, { mes: '回复' }], chatMetadata: {}, extensionSettings: {}, eventSource, eventTypes,
+        chat: [{ mes: '用户', is_user: true }, { mes: '回复<snow>不应分析的小剧场</snow>' }], chatMetadata: {}, extensionSettings: {}, eventSource, eventTypes,
+        regex_placement: { AI_OUTPUT: 2 }, getRegexedString(text, placement, options) { regexCalls.push({placement, options}); return text.replace(/<snow>[\s\S]*?<\/snow>/g, ''); },
         streamingProcessor: { isStopped: false, isFinished: true },
         async saveChat() {}, saveSettingsDebounced() {}, setExtensionPrompt(key, text) { ctx.prompt = text; },
         async generateRaw({ prompt }) {
@@ -77,8 +78,27 @@ test('实际插件界面：自动生效、可选编辑、署名与更新提示�
     document.querySelector('#rpp-main-overview').click();
     assert.equal(document.querySelectorAll('.rpp-feedback').length, 1);
     const feedback = document.querySelector('.rpp-feedback'); feedback.open = true;
-    const rating = feedback.querySelector('select'); rating.value = '4'; rating.dispatchEvent(new window.Event('change'));
-    const note = feedback.querySelector('textarea'); note.value = '这段希望慢一点'; note.dispatchEvent(new window.Event('input'));
+    assert.equal(feedback.querySelector('select'), null);
+    const plotGroup = feedback.querySelector('[role=radiogroup][aria-label="剧情满意度"]');
+    plotGroup.querySelectorAll('[role=radio]')[3].click();
+    assert.equal(plotGroup.querySelector('[aria-checked=true]').getAttribute('aria-label'), '4 分 · 满意');
+    assert.equal(plotGroup.querySelectorAll('.rpp-rating-filled').length, 4);
+    assert.match(feedback.querySelector('summary').textContent, /未保存/);
+    const fourth = plotGroup.querySelector('[aria-checked=true]');
+    fourth.dispatchEvent(new window.KeyboardEvent('keydown', {key:'ArrowLeft', bubbles:true}));
+    assert.match(plotGroup.querySelector('[aria-checked=true]').getAttribute('aria-label'), /3 分/);
+    feedback.querySelector('[aria-label="清除剧情满意度评分"]').click();
+    assert.equal(plotGroup.querySelector('[aria-checked=true]'), null);
+    plotGroup.querySelectorAll('[role=radio]')[3].click();
+    // Changing appearance preserves an unsaved rating and does not submit it.
+    const stars = document.querySelector('[name=rpp-rating-style][value=stars]'); stars.checked = true; stars.dispatchEvent(new window.Event('change'));
+    assert.equal(calls, 0);
+    assert.match(document.querySelector('.rpp-feedback [aria-checked=true]').getAttribute('aria-label'), /4 分/);
+    const numbers = document.querySelector('[name=rpp-rating-style][value=numbers]'); numbers.checked = true; numbers.dispatchEvent(new window.Event('change'));
+    assert.equal(document.querySelector('.rpp-feedback .rpp-rating-number[aria-checked=true]').textContent, '4');
+    const hearts = document.querySelector('[name=rpp-rating-style][value=hearts]'); hearts.checked = true; hearts.dispatchEvent(new window.Event('change'));
+    const currentForm = document.querySelector('.rpp-feedback');
+    const note = currentForm.querySelector('textarea'); note.value = '这段希望慢一点'; note.dispatchEvent(new window.Event('input'));
     findButton('保存反馈').click(); await tick();
     assert.match(document.querySelector('.rpp-feedback summary').textContent, /已保存/);
     assert.equal(calls, 0);
@@ -90,6 +110,11 @@ test('实际插件界面：自动生效、可选编辑、署名与更新提示�
     assert.equal(document.querySelector('#rpp-tab-interaction').classList.contains('rpp-is-active'), false);
     assert.equal(document.querySelector('#rpp-tab-plot').classList.contains('rpp-is-active'), true);
     assert.equal(calls, 1); assert.match(document.querySelector('.rpp-item-title').textContent, /已生效.*推测/);
+    assert.equal(document.querySelector('.rpp-item').open, false);
+    assert.equal(document.querySelector('.rpp-category-assessment').open, false);
+    assert.match(document.querySelector('.rpp-change-badge').textContent, /本轮新增/);
+    assert.match(document.querySelector('.rpp-profile-update').textContent, /最近分析.*新增 1/);
+    assert.deepEqual(regexCalls, [{placement:2,options:{isPrompt:true,depth:0}}]);
     assert.match(ctx.prompt, /放慢剧情/);
     assert.equal(document.querySelector('.rpp-item-edit').open, false);
     assert.match(document.querySelector('.rpp-credit').textContent, /by-NUE-喵喵电波/);
@@ -106,9 +131,15 @@ test('实际插件界面：自动生效、可选编辑、署名与更新提示�
     assert.equal(rawResponse.readOnly, true);
     assert.equal(document.querySelectorAll('.rpp-debug-console img').length, 0);
     assert.match(document.querySelector('textarea[aria-label="第 1 次分析输入"]').value, /这段希望慢一点/);
+    const request = JSON.parse(document.querySelector('textarea[aria-label="第 1 次分析输入"]').value);
+    assert.equal(request.transcript[0].text, '回复');
+    assert.match(ctx.chat[1].mes, /<snow>/);
     findButton('清空调试记录').click(); await tick();
     assert.match(document.querySelector('.rpp-debug-records').textContent, /本页尚无分析记录/);
     assert.match(ctx.prompt, /放慢剧情/);
+    document.querySelector('.rpp-item > summary').click(); await tick();
+    assert.equal(document.querySelector('.rpp-item').open, true);
+    document.querySelector('.rpp-item-edit > summary').click(); await tick();
     const enabled = document.querySelector('.rpp-item input'); enabled.checked = true; enabled.dispatchEvent(new window.Event('change'));
     findButton('保存修改').click(); await tick(); assert.match(ctx.prompt, /放慢剧情/);
     assert.equal(ctx.chatMetadata[KEY].profile[0].manual, true);

@@ -1,6 +1,6 @@
 export const KEY = 'rp_preferences';
 export const CATEGORIES = { interaction: '互动偏好', plot: '剧情偏好', expression: '表达偏好' };
-export const DEFAULTS = Object.freeze({ enabled: true, feedbackMode: 'floors', autoAnalyze: true, analysisFlowVersion: 1, threshold: 3, depth: 2, apiMode: 'main', endpoint: '', model: '' });
+export const DEFAULTS = Object.freeze({ enabled: true, feedbackMode: 'floors', ratingStyle: 'hearts', autoAnalyze: true, analysisFlowVersion: 1, threshold: 3, depth: 2, apiMode: 'main', endpoint: '', model: '' });
 export const uid = () => globalThis.crypto.randomUUID();
 
 export function newState() {
@@ -99,6 +99,36 @@ export function snapshotHistory(state) {
 }
 export function checkpoint(state) { state.history = [...state.history, snapshotHistory(state)].slice(-10); }
 
+export function profileEvolution(items, previousItems, updatedAt, previousUpdatedAt = '') {
+    const profile = items.map(item => {
+        const unchanged = previousItems.find(old => old.category === item.category && old.text === item.text);
+        const parents = previousItems.filter(old => item.previousItemIds?.includes(old.id));
+        return { ...item, changeKind: unchanged ? 'retained' : parents.length ? 'revised' : 'added', updatedAt: unchanged ? unchanged.updatedAt || previousUpdatedAt || updatedAt : updatedAt };
+    });
+    return { items: profile, changes: {
+        added: profile.filter(item => item.changeKind === 'added').length,
+        revised: profile.filter(item => item.changeKind === 'revised').length,
+        retained: profile.filter(item => item.changeKind === 'retained').length,
+        removed: previousItems.filter(old => !profile.some(item => item.previousItemIds?.includes(old.id) || (item.category === old.category && item.text === old.text))).length,
+    } };
+}
+
+export function presentProfile(state) {
+    if (state.lastAnalysis?.changes || !state.lastAnalysis?.items) return { items: state.profile, changes: state.lastAnalysis?.changes };
+    const previous = [...state.history].reverse().find(snapshot => snapshot.analyzedAt !== state.analyzedAt);
+    if (!previous) return { items: state.profile, changes: null };
+    // Upgrade presentation only from recorded evidence, never from list order.
+    const inferred = profileEvolution(state.lastAnalysis.items, previous.profile, state.analyzedAt);
+    const byId = new Map(inferred.items.map(item => [item.id, item]));
+    return { changes: inferred.changes, items: state.profile.map(item => {
+        if (item.changeKind) return item;
+        if (item.manual) return { ...item, changeKind: 'manual' };
+        const recorded = byId.get(item.id);
+        if (!recorded || recorded.text !== item.text || recorded.category !== item.category) return item;
+        return { ...item, changeKind: recorded.changeKind, ...(recorded.changeKind !== 'retained' ? { updatedAt: state.analyzedAt } : {}) };
+    }) };
+}
+
 export class AnalysisValidationError extends Error {}
 
 export const SYSTEM_PROMPT = `你是 RP 偏好分析器。分析的是当前单人聊天存档的用户体验，不扮演角色、不续写剧情。
@@ -115,7 +145,7 @@ transcript 只包含本轮评价所对应的角色回复，每条用 feedbackId 
 {"summary":"说明相对上一版保留、修改、删除了什么及不确定性","categoryReports":{"interaction":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"},"plot":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"},"expression":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"}},"items":[{"category":"interaction|plot|expression","text":"新版完整补充","confidence":"explicit|repeated|tentative","sourceIds":["本轮或有效历史反馈 id"],"previousItemIds":["沿用或修订的上一版条目 id"]}]}
 每条至少有 sourceIds 或 previousItemIds 之一。previousItemIds 只能引用 previousAnalysis.items 的条目，插件会继承仍有效的历史来源；保留无评分来源的用户手动补充时可以只引用其 previousItemIds。改写时说明新评价依据。items 最多 18 条，每类最多 6 条，每条最多 500 字。没有可用偏好可以返回空数组。`;
 
-export function analysisInput(context, state, settings, { automatic = false, feedbackIds } = {}) {
+export function analysisInput(context, state, settings, { automatic = false, feedbackIds, transformText, deferTextProcessing = false } = {}) {
     const all = activeFeedback(context.chat);
     let pending = pendingFeedback(context.chat, state);
     if (feedbackIds) pending = pending.filter(f => feedbackIds.includes(f.id));
@@ -127,11 +157,21 @@ export function analysisInput(context, state, settings, { automatic = false, fee
     }
     if (!pending.length) throw new Error('当前没有新的有效反馈。可以修改评分或短评后再次分析。');
     const proof = sourceProof(context.chat);
-    const previousItems = state.profile.map(item => ({ ...item, sourceActive: sourcesActive(item, context.chat, proof), editable: true, sourceIds: item.sourceIds.filter(id => proof.ids.has(id)), sourceKeys: (item.sourceKeys ?? []).filter(key => proof.keys.has(key)) }));
+    const previousItems = state.profile.map(item => {
+        const inputItem = { ...item }; delete inputItem.changeKind; delete inputItem.updatedAt;
+        return { ...inputItem, sourceActive: sourcesActive(item, context.chat, proof), editable: true, sourceIds: item.sourceIds.filter(id => proof.ids.has(id)), sourceKeys: (item.sourceKeys ?? []).filter(key => proof.keys.has(key)) };
+    });
     const relevantIds = new Set([...pending.map(f => f.id), ...previousItems.flatMap(item => item.sourceIds)]);
     const evidence = all.filter(f => relevantIds.has(f.id));
     // Evidence and text are one-to-one: never append unrelated latest messages.
-    const transcript = pending.map(f => ({ feedbackId: f.id, floor: f.index, speaker: 'char', text: context.chat[f.index].mes }));
+    const transcript = pending.map(f => {
+        const raw = context.chat[f.index].mes;
+        const depth = context.chat.slice(f.index + 1).filter(message => !message.is_system).length;
+        const text = transformText ? transformText(raw, { depth, index: f.index }) : raw;
+        if (typeof text !== 'string') throw new Error('酒馆正则未返回文本，本批未发送。');
+        if (!text.trim()) throw new Error(`第 ${f.index} 楼经发送正则处理后没有可分析正文，本批未发送，评价已保留。`);
+        return { feedbackId: f.id, floor: f.index, speaker: 'char', text };
+    });
     // Refuse silently dropping rated evidence: a too-large input needs user adjustment.
     const card = context.characters[context.characterId];
     const data = card?.data ?? card ?? {};
@@ -141,9 +181,10 @@ export function analysisInput(context, state, settings, { automatic = false, fee
         invalidatedItemIds: state.profile.filter(item => !item.manual && !sourcesActive(item, context.chat, proof)).map(item => item.id),
         lastBatchKeys: state.lastAnalysis?.newFeedbackKeys ?? [],
     } : null;
-    const payload = { character, feedback: pending.map(f => ({ ...f, analysisKey: feedbackKey(f) })), newFeedbackIds: pending.map(f => f.id), previousAnalysis, transcript };
+    const payload = { character, feedback: pending.map(f => ({ ...f, analysisKey: feedbackKey(f) })), newFeedbackIds: pending.map(f => f.id), previousAnalysis, transcript,
+        ...(transformText ? { transcriptProcessing: '已按酒馆发送到模型的正则处理。只分析保留下来的主线正文；小剧场和被正则排除的内容不属于本轮证据，不从旧结论还原这些内容。若旧结论混淆了小剧场与主线，应修正或删除相关推断。' } : {}) };
     const prompt = JSON.stringify(payload);
-    if (prompt.length > 90000) throw new Error('原角色设定或被评价楼层正文过长，请调低自动累计条数。评价已保留。');
+    if (!deferTextProcessing && prompt.length > 90000) throw new Error('原角色设定或被评价楼层正文过长，请调低自动累计条数。评价已保留。');
     return { prompt, pending, evidence, previousItems };
 }
 
