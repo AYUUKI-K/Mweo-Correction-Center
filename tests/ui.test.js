@@ -97,6 +97,18 @@ test('实际插件界面：自动生效、可选编辑、署名与更新提示�
     assert.equal(document.querySelector('.rpp-update-status').textContent, '暂无新版本');
     assert.doesNotMatch(document.querySelector('#rpp-profile-step').textContent, /待确认/);
     assert.equal(document.querySelectorAll('.rpp-analysis-summary img').length, 0);
+    assert.equal(document.querySelector('.rpp-debug-console').open, false);
+    findButton('打开调试台').click(); await tick();
+    assert.equal(document.querySelector('#rpp-page-records').hidden, false);
+    assert.equal(document.querySelector('.rpp-debug-console').open, true);
+    const rawResponse = document.querySelector('textarea[aria-label="第 1 次 AI 原始返回"]');
+    assert.match(rawResponse.value, /<img src=x onerror=alert\(1\)>/);
+    assert.equal(rawResponse.readOnly, true);
+    assert.equal(document.querySelectorAll('.rpp-debug-console img').length, 0);
+    assert.match(document.querySelector('textarea[aria-label="第 1 次分析输入"]').value, /这段希望慢一点/);
+    findButton('清空调试记录').click(); await tick();
+    assert.match(document.querySelector('.rpp-debug-records').textContent, /本页尚无分析记录/);
+    assert.match(ctx.prompt, /放慢剧情/);
     const enabled = document.querySelector('.rpp-item input'); enabled.checked = true; enabled.dispatchEvent(new window.Event('change'));
     findButton('保存修改').click(); await tick(); assert.match(ctx.prompt, /放慢剧情/);
     assert.equal(ctx.chatMetadata[KEY].profile[0].manual, true);

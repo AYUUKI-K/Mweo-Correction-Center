@@ -15,14 +15,14 @@ const realFetch=window.fetch.bind(window);window.fetch=(url,options)=>realFetch(
 const eventTypes = Object.fromEntries(['APP_READY','GENERATION_STARTED','GENERATION_ENDED','GENERATION_STOPPED','CHAT_CHANGED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SWIPED'].map(x=>[x,x]));
 const eventSource = {on(k,fn){handlers.set(k,[...(handlers.get(k)||[]),fn])},removeListener(k,fn){handlers.set(k,(handlers.get(k)||[]).filter(x=>x!==fn))},emit(k){for(const fn of handlers.get(k)||[])fn()}};
 const chats = [{id:'围巾与初雪',chat:[{mes:'外面好像下雪了。我出门时没带围巾。',is_user:true},{mes:'他停下翻书的动作，目光在窗外落了一瞬。\n\n“柜子第二层。”他说，又低下头去，“那条灰色的，你先拿着。”',swipe_id:0}],metadata:{}},{id:'旅途中的夜晚',chat:[{mes:'今晚我们在哪里落脚？',is_user:true},{mes:'“前面有间旅店。”他把地图收回衣袋，放慢脚步等你跟上。',swipe_id:0}],metadata:{}}];
-let selected=0,calls=0;
+let selected=0,calls=0,invalidSource=false;
 const ctx = {characters:[{name:'沈砚',avatar:'fixture.png',data:{description:'安静、慢热，常通过行动表达关心。',personality:'克制，尊重他人的选择。'}}],characterId:0,groupId:null,chatId:chats[0].id,chat:chats[0].chat,chatMetadata:chats[0].metadata,extensionSettings:{},eventTypes,eventSource,
 streamingProcessor:{isStopped:false,isFinished:true},
 getRequestHeaders(){return {'Content-Type':'application/json'}},saveSettingsDebounced(){},async saveChat(){},setExtensionPrompt(k,text){window.injectedPrompt=text},
 async generateRaw({prompt}){
     calls++;document.querySelector('#fixture-status').textContent='本地模拟自动分析 '+calls+' 次，无真实 API 请求。';
     await new Promise(r=>setTimeout(r,500));const p=JSON.parse(prompt);
-    const item=(category,text,confidence)=>({category,text,confidence,sourceIds:p.newFeedbackIds,previousItemIds:(p.previousAnalysis?.items??[]).filter(x=>x.category===category).map(x=>x.id)});
+    const item=(category,text,confidence)=>({category,text,confidence,sourceIds:invalidSource?['fixture-unknown-id']:p.newFeedbackIds,previousItemIds:(p.previousAnalysis?.items??[]).filter(x=>x.category===category).map(x=>x.id)});
     return JSON.stringify({summary:'模拟结果：结合新评价修订整份偏好；剧情及文笔为间接推测，自动生效。此处为预设演示，不是真实模型推断。',categoryReports:{interaction:{status:'updated',reason:'模拟：按短评调整角色表达关心的方式。'},plot:{status:'updated',reason:'模拟推测：高评分回复推进较克制，结合新评价持续修订。'},expression:{status:'updated',reason:'模拟推测：回复以简短对白和动作呈现关心，自动应用克制的表达偏好。'}},items:[item('interaction','通过行动表达关心，保持原角色慢热、克制的表达习惯。',p.feedback.some(f=>f.note)?'explicit':'tentative'),item('plot','可能偏好逐步推进关系，避免过快跨越发展阶段。','tentative'),item('expression','可能偏好简短对白和具体动作描写，减少空泛抒情。','tentative')]});
 }};
 window.SillyTavern={getContext:()=>({...ctx})};
@@ -31,6 +31,9 @@ document.querySelector('#theme').onclick=()=>document.body.classList.toggle('lig
 document.querySelector('#swipe').onclick=()=>{const m=ctx.chat[1];m.swipe_id=m.swipe_id===0?1:0;m.mes=m.swipe_id===0?'他将围巾放在你身旁，没有多说。':'他走到柜子前，拿出围巾递给你。“天冷，别忘了。”';draw();eventSource.emit('MESSAGE_SWIPED')};
 document.querySelector('#switch').onclick=()=>{selected=1-selected;const save=chats[selected];Object.assign(ctx,{chatId:save.id,chat:save.chat,chatMetadata:save.metadata});draw();eventSource.emit('CHAT_CHANGED')};
 draw();await import('/scripts/extensions/third-party/Mweo-Correction-Center/index.js');document.querySelector('.rpp-drawer').open=true;document.querySelector('.rpp-feedback').open=true;
+const invalidButton=document.createElement('button');invalidButton.className='menu_button';invalidButton.textContent='模拟无效来源返回';
+document.querySelector('#fixture-controls').append(invalidButton);
+invalidButton.onclick=()=>{invalidSource=!invalidSource;invalidButton.textContent=invalidSource?'已开启模拟无效来源（点此恢复）':'模拟无效来源返回'};
 // Exercise a long save with pagination: only floors 995..999 are mounted.
 const longSave=document.createElement('button');longSave.className='menu_button';longSave.textContent='浏览第 997 楼（共 999 楼）';
 document.querySelector('#fixture-controls').append(longSave);

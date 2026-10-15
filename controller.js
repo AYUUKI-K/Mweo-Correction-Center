@@ -1,8 +1,11 @@
-import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems, feedbackKey, sameFeedback, migrateState } from './core.js';
+import { KEY, DEFAULTS, newState, normalizeFeedback, revisionOf, eligible, activeFeedback, pendingFeedback, buildInjection, analysisInput, parseResult, checkpoint, uid, CATEGORIES, usableItems, feedbackKey, sameFeedback, migrateState, AnalysisValidationError } from './core.js';
 import { callAnalyzer } from './api.js';
+import { DEBUG_ENABLED } from './debug-config.js';
 
 export function createController({ getContext, isGenerating, notify = () => {}, changed = () => {}, analyzer = callAnalyzer }) {
     let busy = false, task = null, generationActive = false, sessionKey = '', disposed = false;
+    const attempts = new WeakMap();
+    const debugHistory = new WeakMap();
     const context = () => getContext();
     function supported(ctx) { return !ctx.groupId && ctx.characterId != null && ctx.characters?.[ctx.characterId] && (ctx.chatId || ctx.getCurrentChatId?.()); }
     function settings() { const ctx = context(); return ctx.extensionSettings[KEY] ??= { ...DEFAULTS }; }
@@ -100,18 +103,45 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         const originChat = ctx.chat, originMetadata = ctx.chatMetadata, originKey = key(ctx);
         const pendingKeys = input.pending.map(feedbackKey);
         const run = { abort: new AbortController(), cancelled: false };
+        const attempt = { status: 'running', batchSize: input.pending.length, repairAttempts: 0, error: '', startedAt: new Date().toISOString(), requests: [] };
+        attempts.set(originMetadata, attempt);
+        if (DEBUG_ENABLED) debugHistory.set(originMetadata, [...(debugHistory.get(originMetadata) ?? []), attempt].slice(-10));
         busy = true; task = run; changed();
         notify(automatic ? '正在分析累计反馈…' : '正在分析反馈与相关上下文…');
         let didApply = false;
+        const originUnchanged = () => {
+            const current = context();
+            if (run.cancelled || key(current) !== originKey || current.chat !== originChat || current.chatMetadata !== originMetadata || state(current) !== originState || originState.epoch !== epoch) return false;
+            const activeKeys = new Set(activeFeedback(current.chat).map(feedbackKey));
+            return input.evidence.every(f => activeKeys.has(feedbackKey(f)));
+        };
+        const ask = async (prompt, label) => {
+            const entry = DEBUG_ENABLED ? { label, prompt, response: '', error: '', validationError: '' } : null;
+            if (entry) { attempt.requests.push(entry); changed(); }
+            try {
+                const raw = await analyzer(ctx, { ...DEFAULTS, ...settings() }, prompt, { apiKey, signal: run.abort.signal });
+                if (entry) entry.response = String(raw);
+                return raw;
+            } catch (error) { if (entry) entry.error = error.message; throw error; }
+        };
         const timer = setTimeout(() => { run.cancelled = true; run.abort.abort(); notify('分析等待超过两分钟，结果将不再应用。请检查 API；反馈已保留。', true); }, 120000);
         try {
-            const raw = await analyzer(ctx, { ...DEFAULTS, ...settings() }, input.prompt, { apiKey, signal: run.abort.signal });
-            const current = context();
-            const activeKeys = new Set(activeFeedback(current.chat).map(feedbackKey));
-            if (run.cancelled || key(current) !== originKey || current.chat !== originChat || current.chatMetadata !== originMetadata || state(current) !== originState || originState.epoch !== epoch || input.evidence.some(f => !activeKeys.has(feedbackKey(f)))) {
-                notify('聊天或反馈已变化，本次结果未应用。反馈已保留，可以重新分析。'); return;
+            let raw = await ask(input.prompt, '首次分析');
+            if (!originUnchanged()) {
+                attempt.status = 'cancelled'; notify('聊天或反馈已变化，本次结果未应用。反馈已保留，可以重新分析。'); return;
             }
-            const result = parseResult(raw, input.evidence, { previousItems: input.previousItems });
+            let result;
+            try { result = parseResult(raw, input.evidence, { previousItems: input.previousItems }); }
+            catch (error) {
+                if (!(error instanceof AnalysisValidationError)) throw error;
+                if (DEBUG_ENABLED) attempt.requests.at(-1).validationError = error.message;
+                attempt.repairAttempts = 1;
+                notify('自动分析已触发，返回未通过校验，正在自动修复一次格式或来源引用…');
+                const repairPrompt = JSON.stringify({ ...JSON.parse(input.prompt), responseRepair: { error: error.message, invalidResponse: String(raw).slice(0, 16000), instruction: '精确复制有效 ID，返回三类说明和完整新版 items；仅修复输出结构及引用，不发明证据。' } });
+                raw = await ask(repairPrompt, '自动格式修复');
+                if (!originUnchanged()) { attempt.status = 'cancelled'; notify('聊天或反馈已变化，格式修复结果未应用。评价已保留。'); return; }
+                result = parseResult(raw, input.evidence, { previousItems: input.previousItems });
+            }
             const previous = structuredClone(originState);
             checkpoint(originState);
             const excluded = new Set(originState.dismissed ?? []);
@@ -127,8 +157,13 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
                 if (await ctx.saveChat() === false) throw new Error('聊天存档保存失败。');
             } catch (error) { Object.assign(originState, previous); throw error; }
             didApply = true;
+            attempt.status = 'applied';
             const applied = originState.enabled ? usableItems(ctx.chat, originState).length : 0;
-            notify(`自动修正完成：${applied} 条补充已生效，后续评价会继续修订。`);
+            notify(`自动修正完成：${applied} 条补充已生效${attempt.repairAttempts ? '（已自动修复返回格式）' : ''}，后续评价会继续修订。`);
+        } catch (error) {
+            attempt.status = run.cancelled ? 'cancelled' : 'failed'; attempt.error = error.message;
+            if (DEBUG_ENABLED && error instanceof AnalysisValidationError && attempt.requests.length) attempt.requests.at(-1).validationError = error.message;
+            throw new Error(`自动分析已触发，但本批未应用：${error.message} 旧修正及 ${input.pending.length} 条评价已保留。`);
         } finally { clearTimeout(timer); if (task === run) task = null; busy = false; refresh(); if ((didApply && automatic) || key(context()) !== originKey) scheduleAuto(); }
     }
     async function editItem(id, text, enabled) {
@@ -185,5 +220,13 @@ export function createController({ getContext, isGenerating, notify = () => {}, 
         generationActive = true; cancel(); inject();
     }
     function generationEnded() { generationActive = false; refresh(); scheduleAuto(); }
-    return { context, settings, state, supported, inject, refresh, saveFeedback, removeFeedback, analyze, editItem, deleteItem, addItem, undo, clearProfile, setChatEnabled, cancel, dispose, scheduleAuto, generationStarted, generationEnded, get busy() { return busy; } };
+    function clearDebug() {
+        if (busy) throw new Error('分析完成后可清空调试记录。');
+        const metadata = context().chatMetadata;
+        debugHistory.delete(metadata);
+        const latest = attempts.get(metadata);
+        if (latest) latest.requests = [];
+        changed();
+    }
+    return { context, settings, state, supported, inject, refresh, saveFeedback, removeFeedback, analyze, editItem, deleteItem, addItem, undo, clearProfile, setChatEnabled, cancel, dispose, scheduleAuto, generationStarted, generationEnded, clearDebug, get busy() { return busy; }, get analysisAttempt() { return attempts.get(context().chatMetadata) ?? null; }, get analysisDebug() { return DEBUG_ENABLED ? debugHistory.get(context().chatMetadata) ?? [] : []; } };
 }

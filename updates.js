@@ -1,4 +1,4 @@
-export const VERSION = '0.7.0';
+export const VERSION = '0.7.1';
 export const CREDIT = 'by-NUE-喵喵电波';
 export const REPOSITORY = 'https://github.com/AYUUKI-K/Mweo-Correction-Center';
 export const LATEST_MANIFEST = 'https://raw.githubusercontent.com/AYUUKI-K/Mweo-Correction-Center/main/manifest.json';

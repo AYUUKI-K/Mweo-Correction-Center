@@ -2,6 +2,7 @@ import { KEY, DEFAULTS, CATEGORIES, activeFeedback, pendingFeedback, currentFeed
 import { createController } from './controller.js';
 import { callAnalyzer } from './api.js';
 import { VERSION, CREDIT, REPOSITORY, createUpdateManager } from './updates.js';
+import { DEBUG_ENABLED } from './debug-config.js';
 
 let controller, panel, workbench, home, status, profileList, stats, preview, sessionApiKey = '', observer;
 let floatingButton, floatingWindow, floatingFeedback, floatingHeading, floatingPreview, floatingStatus, renderedMetadata, focusedFloor;
@@ -23,6 +24,7 @@ let nativeHostState;
 let mainTabs, recordsList, activePage = 'overview';
 let automaticOptions, analysisModeHelp, bulkAnalysisHelp;
 let updater, updateStatus, updateNotice, checkUpdateButton, installUpdateButton, reloadButton;
+let attemptDetails, attemptInfo, debugConsole, debugRecords;
 const pages = {};
 const MAIN_TABS = { overview: ['概览', 'book'], settings: ['设置', 'sliders'], prompts: ['提示词', 'pen'], records: ['记录', 'archive'] };
 
@@ -141,7 +143,7 @@ function mountPanel() {
     const drawer = el('details', 'rpp-drawer');
     const title = el('summary', 'rpp-title standoutHeader'); const chevron = icon('chevron'); chevron.classList.add('rpp-chevron');
     updateNotice = el('small', 'rpp-update-notice'); updateNotice.hidden = true;
-    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', `v${VERSION}`), updateNotice, chevron); drawer.append(title);
+    title.append(icon('cat'), el('b', '', '喵喵修正中心'), el('small', 'rpp-version', `v${VERSION}${DEBUG_ENABLED ? ' · 调试版' : ''}`), updateNotice, chevron); drawer.append(title);
     const body = el('div', 'rpp-body');
     const entranceField = el('fieldset', 'rpp-entrance'); entranceField.append(el('legend', '', '反馈入口（二选一）'));
     for (const [value, label] of [['floors', '楼层反馈'], ['floating', '悬浮球']]) {
@@ -196,8 +198,23 @@ function mountPanel() {
     const cancel = button('取消本次应用', () => { controller.cancel(); announce('已取消本次应用。酒馆当前 API 请求可能仍需等待结束。'); }); cancel.id = 'rpp-cancel';
     actions.append(cancel); feedbackSection.append(actions);
     status = el('p', 'rpp-status', '当前存档已就绪。'); status.setAttribute('role', 'status'); workbench.insertBefore(status, pages.overview);
+    if (DEBUG_ENABLED) {
+        const openDebug = button('打开调试台', () => { choosePage('records'); debugConsole.open = true; debugConsole.scrollIntoView?.({block:'nearest'}); });
+        openDebug.classList.add('rpp-debug-shortcut'); workbench.insertBefore(openDebug, pages.overview);
+    }
     analysisSummaryDetails = el('details', 'rpp-analysis-details'); analysisSummaryDetails.append(el('summary', '', '查看本次分析说明'));
     analysisSummary = el('p', 'rpp-analysis-summary'); analysisSummaryDetails.append(analysisSummary); pages.records.append(analysisSummaryDetails);
+    attemptDetails = el('details', 'rpp-analysis-details'); attemptDetails.hidden = true;
+    attemptDetails.append(el('summary', '', '最近一次自动分析诊断'));
+    attemptInfo = el('p', 'rpp-help');
+    attemptDetails.append(attemptInfo); pages.records.append(attemptDetails);
+    if (DEBUG_ENABLED) {
+        debugConsole = el('details', 'rpp-debug-console'); debugConsole.append(el('summary', '', '调试台 · AI 原始返回'));
+        debugConsole.addEventListener('toggle', () => renderDebug());
+        debugRecords = el('div', 'rpp-debug-records');
+        debugConsole.append(el('p', 'rpp-help', '当前存档最近 10 批分析，只保存在本页内存。成功、失败及格式修复的返回分别保留，不自动上传或写入存档。'), button('清空调试记录', () => controller.clearDebug()), debugRecords);
+        pages.records.append(debugConsole);
+    }
     feedbackSection.append(button('查看偏好补充', () => choosePage('prompts')));
     pages.overview.append(feedbackSection);
     bulkAnalysisHelp = el('p', 'rpp-help'); feedbackSection.append(bulkAnalysisHelp);
@@ -254,6 +271,28 @@ function mountPanel() {
     drawer.append(body); panel.append(drawer); target.append(panel); return true;
 }
 
+function renderDebug() {
+    if (!DEBUG_ENABLED || !debugRecords) return;
+    if (!debugConsole.open) { debugRecords.replaceChildren(); return; }
+    const history = controller.analysisDebug;
+    const nodes = [...history].reverse().map(batch => {
+        const node = el('details', 'rpp-debug-batch'); node.open = batch === history.at(-1);
+        const labels = {running:'分析中',applied:'已应用',failed:'未应用',cancelled:'已取消'};
+        node.append(el('summary', '', `${batch.startedAt} · ${batch.batchSize} 条评价 · ${labels[batch.status]}`));
+        if (batch.error) node.append(el('p', 'rpp-error', batch.error));
+        batch.requests.forEach((request, index) => {
+            const record = el('section', 'rpp-debug-record'); record.append(el('h4', '', `${index + 1} · ${request.label}`));
+            if (request.error || request.validationError) record.append(el('p', 'rpp-error', request.validationError || request.error));
+            const inputDetails = el('details'); inputDetails.append(el('summary', '', '发送给 AI 的输入（JSON）'));
+            const input = el('textarea', 'text_pole rpp-preview'); input.readOnly = true; input.rows = 6; input.value = request.prompt; input.setAttribute('aria-label', `第 ${index + 1} 次分析输入`); inputDetails.append(input);
+            const response = el('textarea', 'text_pole rpp-preview'); response.readOnly = true; response.rows = 9; response.value = request.response; response.setAttribute('aria-label', `第 ${index + 1} 次 AI 原始返回`); response.placeholder = request.error ? '请求未取得 AI 返回，详见上方错误。' : '等待 AI 返回…';
+            record.append(inputDetails, field(`第 ${index + 1} 次 AI 原始返回`, response)); node.append(record);
+        });
+        return node;
+    });
+    debugRecords.replaceChildren(...(nodes.length ? nodes : [el('p', 'rpp-help', '本页尚无分析记录。下一次自动分析后会在这里显示 AI 返回。')]));
+}
+
 function renderProfile() {
     const ctx = controller.context();
     manualInput.value = manualDrafts.get(activeCategory) ?? '';
@@ -282,6 +321,10 @@ function renderProfile() {
         row.append(el('p', '', feedback.note || '仅评分，无短评。')); return row;
     }) : [el('p', 'rpp-empty', '当前档还没有有效反馈记录。')]));
     const pending = pendingFeedback(ctx.chat, state, controller.settings()).length;
+    const attempt = controller.analysisAttempt;
+    attemptDetails.hidden = !attempt;
+    attemptInfo.textContent = attempt ? `本批 ${attempt.batchSize} 条评价 · ${ {running:'分析中',applied:'已应用',failed:'未应用',cancelled:'已取消'}[attempt.status] } · 格式修复 ${attempt.repairAttempts} 次${attempt.error ? `。${attempt.error}` : ''}` : '';
+    renderDebug();
     const report = state.categoryReports?.[activeCategory];
     categoryAssessment.hidden = !state.analyzedAt;
     const reportLabels = { updated: '本轮已更新', unchanged: '保留上次结论', insufficient: '本轮证据不足' };
@@ -545,6 +588,7 @@ function render() {
     analysisModeHelp.textContent = settings.autoAnalyze ? `保存即可：每累计 ${settings.threshold} 条新评价自动修订整份补充，包含角色、剧情与文笔。` : '自动分析已暂停，保存的评价仍会保留，开启后再按累计数量分析。';
     const waiting = controller.supported(controller.context()) ? pendingFeedback(controller.context().chat, controller.state()).length : 0;
     bulkAnalysisHelp.textContent = `待分析 ${waiting} 条 / 累计 ${settings.threshold} 条自动触发。每轮用新评价及对应正文修订上一版全部补充，包括你手动编辑的内容。`;
+    if (controller.analysisAttempt?.status === 'failed') bulkAnalysisHelp.textContent = `本批已触发自动分析，但返回未通过校验或请求失败。${waiting} 条评价已保留，旧修正继续生效。可在“记录”查看诊断${DEBUG_ENABLED ? '或打开调试台查看 AI 原文' : ''}。`;
     choosePage(activePage);
     const floating = controller.settings().feedbackMode === 'floating';
     floatingButton.hidden = !controller.settings().enabled || !floating;

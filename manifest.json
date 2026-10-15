@@ -4,7 +4,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "NUE · 喵喵电波",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "homePage": "https://github.com/AYUUKI-K/Mweo-Correction-Center",
   "auto_update": false,
   "minimum_client_version": "1.12.11",

@@ -99,6 +99,8 @@ export function snapshotHistory(state) {
 }
 export function checkpoint(state) { state.history = [...state.history, snapshotHistory(state)].slice(-10); }
 
+export class AnalysisValidationError extends Error {}
+
 export const SYSTEM_PROMPT = `你是 RP 偏好分析器。分析的是当前单人聊天存档的用户体验，不扮演角色、不续写剧情。
 原角色卡是不可修改的边界；只补充人设允许范围内的相处方式、剧情节奏、表达习惯。不要重写性格、背景、身份或能力。
 评分低不能单独证明用户讨厌某个剧情类型。区分剧情满意度与角色表现满意度。不要把剧情事实、临时情绪或人物关系状态记录为永久偏好。
@@ -108,6 +110,7 @@ feedback 只包含本轮尚未处理的新评价。previousAnalysis.items 是上
 transcript 只包含本轮评价所对应的角色回复，每条用 feedbackId 与评价绑定。只依据被评价的回复推断，不将缺失上下文脑补为剧情事实。
 每轮必须独立检查 interaction（相处方式）、plot（剧情走向、冲突、推进节奏）、expression（文笔、对白、动作细节、叙述节奏）。不只提取短评里的关键词，也要对照评分高低与对应楼层正文的共同特征，推测潜在偏好。短评只提角色不代表忽略剧情和文笔。间接推断尤其是文笔仅由总体评分推得时，使用 tentative 并说明证据与不确定性，不能把高分直接等同于喜欢该楼所有特征。没有任何可辨别线索时可以留空，不强行凑齐分类。
 为每类返回 status 和 reason：updated（本轮有增删改）、unchanged（保留旧结论）或 insufficient（证据不足）。reason 应点明评分、正文特征或缺少什么证据，而非只说短评未提该类。三条评价是触发数量，不代表每类都有可靠偏好。
+来源 ID 必须从 feedback.id 和 previousAnalysis.items.id 精确复制，不要使用楼层编号、analysisKey 或 sourceKeys。保留旧条目时填写 previousItemIds；旧项 confidence=manual 时，输出 confidence 用 explicit。若顶层 responseRepair 存在，表示上次返回未通过校验：依据原输入和错误说明，重新返回完整合法的 B，不能发明来源，也不能只返回修复的一条。
 仅返回一个 JSON 对象，不要 Markdown 或解释，结构为：
 {"summary":"说明相对上一版保留、修改、删除了什么及不确定性","categoryReports":{"interaction":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"},"plot":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"},"expression":{"status":"updated|unchanged|insufficient","reason":"本类的证据或不更新原因"}},"items":[{"category":"interaction|plot|expression","text":"新版完整补充","confidence":"explicit|repeated|tentative","sourceIds":["本轮或有效历史反馈 id"],"previousItemIds":["沿用或修订的上一版条目 id"]}]}
 每条至少有 sourceIds 或 previousItemIds 之一。previousItemIds 只能引用 previousAnalysis.items 的条目，插件会继承仍有效的历史来源；保留无评分来源的用户手动补充时可以只引用其 previousItemIds。改写时说明新评价依据。items 最多 18 条，每类最多 6 条，每条最多 500 字。没有可用偏好可以返回空数组。`;
@@ -147,31 +150,59 @@ export function analysisInput(context, state, settings, { automatic = false, fee
 export function parseResult(raw, evidence, { previousItems = [] } = {}) {
     let text = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     let data;
-    try { data = JSON.parse(text); } catch { throw new Error('AI 没有返回有效 JSON。反馈已保留，请重试或更换模型。'); }
-    if (!data || !Array.isArray(data.items) || data.items.length > 18 || typeof data.summary !== 'string') throw new Error('AI 返回结构不正确，未应用任何补充。');
+    try { data = JSON.parse(text); } catch { throw new AnalysisValidationError('AI 返回不是完整 JSON，可能被截断。请检查分析 API 的回复长度。'); }
+    if (!data || !Array.isArray(data.items) || data.items.length > 18 || typeof data.summary !== 'string') throw new AnalysisValidationError('AI 返回须含 summary 文本和 items 数组，且最多 18 条补充。');
     const categoryReports = {};
     for (const key of Object.keys(CATEGORIES)) {
         const report = data.categoryReports?.[key];
-        if (!report || !['updated', 'unchanged', 'insufficient'].includes(report.status) || typeof report.reason !== 'string' || !report.reason.trim()) throw new Error('AI 未完整说明三类偏好的判断原因。反馈已保留，请重试。');
+        if (!report || !['updated', 'unchanged', 'insufficient'].includes(report.status) || typeof report.reason !== 'string' || !report.reason.trim()) throw new AnalysisValidationError(`AI 未完整说明三类偏好：${key} 缺少有效 status 或 reason。`);
         categoryReports[key] = { status: report.status, reason: report.reason.trim().slice(0, 500) };
     }
     const byId = new Map(evidence.map(f => [f.id, f]));
     const previousById = new Map(previousItems.map(item => [item.id, item]));
     const counts = {};
-    const items = data.items.map(item => {
-        if (!item || !Object.hasOwn(CATEGORIES, item.category) || typeof item.text !== 'string' || !item.text.trim() || item.text.length > 500 || !['explicit', 'repeated', 'tentative'].includes(item.confidence) || !Array.isArray(item.sourceIds) || item.sourceIds.some(id => !byId.has(id)) || (item.previousItemIds !== undefined && (!Array.isArray(item.previousItemIds) || item.previousItemIds.some(id => !previousById.has(id))))) throw new Error('AI 补充包含无效内容或反馈来源，未应用任何补充。');
-        counts[item.category] = (counts[item.category] ?? 0) + 1;
-        if (counts[item.category] > 6) throw new Error('AI 返回的单类偏好过多，未应用任何补充。');
-        const previousItemIds = [...new Set(item.previousItemIds ?? [])], parents = previousItemIds.map(id => previousById.get(id));
-        if (parents.some(parent => parent.sourceActive === false) && !item.sourceIds.length) throw new Error('失效的旧补充需要新的评价依据，未应用任何补充。');
-        const sourceIds = [...new Set([...item.sourceIds, ...parents.flatMap(parent => parent.sourceIds).filter(id => byId.has(id))])];
+    const categoryAliases = { '角色相处': 'interaction', '互动偏好': 'interaction', '剧情走向': 'plot', '剧情偏好': 'plot', '表达细节': 'expression', '表达偏好': 'expression', '文笔': 'expression' };
+    const items = data.items.map((item, index) => {
+        const fail = message => { throw new AnalysisValidationError(`第 ${index + 1} 条补充：${message}`); };
+        if (!item || typeof item !== 'object') fail('须为对象。');
+        const category = categoryAliases[item.category] ?? item.category;
+        if (!Object.hasOwn(CATEGORIES, category)) fail('category 须为 interaction、plot 或 expression。');
+        if (typeof item.text !== 'string' || !item.text.trim()) fail('text 不能为空。');
+        if (item.text.length > 500) fail(`text 超过 500 字（当前 ${item.text.length} 字）。`);
+        const refs = (value, field) => {
+            if (value == null) return [];
+            const values = typeof value === 'string' ? [value] : value;
+            if (!Array.isArray(values) || values.some(id => typeof id !== 'string' || !id.trim())) fail(`${field} 须为有效 ID 字符串数组。`);
+            return values.map(id => id.trim());
+        };
+        const requestedSources = refs(item.sourceIds, 'sourceIds'), requestedParents = refs(item.previousItemIds, 'previousItemIds');
+        const direct = new Set(), previous = new Set();
+        // UUID namespaces sometimes get swapped by a model. Resolve only exact,
+        // known IDs; never manufacture provenance or fuzzy-match unknown IDs.
+        for (const id of [...requestedSources, ...requestedParents]) {
+            if (byId.has(id)) direct.add(id);
+            else if (previousById.has(id)) previous.add(id);
+            else fail(`反馈来源或历史条目 ID 不存在：${id.slice(0, 100)}。请精确复制输入中的 ID。`);
+        }
+        // An unchanged copied old item can safely inherit its own known origin.
+        if (!previous.size) {
+            const matches = previousItems.filter(old => old.category === category && old.text === item.text.trim());
+            const known = previousById.get(item.id);
+            if (known && known.category === category && known.text === item.text.trim()) previous.add(known.id);
+            else if (!direct.size && matches.length === 1) previous.add(matches[0].id);
+        }
+        counts[category] = (counts[category] ?? 0) + 1;
+        if (counts[category] > 6) fail('该类超过 6 条。');
+        const previousItemIds = [...previous], parents = previousItemIds.map(id => previousById.get(id));
+        if (parents.some(parent => parent.sourceActive === false) && !direct.size) fail('失效的旧补充需要新的评价依据。');
+        const sourceIds = [...new Set([...direct, ...parents.flatMap(parent => parent.sourceIds).filter(id => byId.has(id))])];
         const userAnchored = parents.some(parent => parent.manual || parent.userAnchored);
-        if (!sourceIds.length && !userAnchored) throw new Error('AI 补充缺少有效反馈来源或历史条目，未应用任何补充。');
-        const unchanged = parents.find(parent => parent.category === item.category && parent.text === item.text.trim());
-        let confidence = item.confidence;
+        if (!sourceIds.length && !userAnchored) fail('缺少有效反馈来源或历史条目。');
+        const unchanged = parents.find(parent => parent.category === category && parent.text === item.text.trim());
+        let confidence = ['explicit', 'repeated', 'tentative'].includes(item.confidence) ? item.confidence : 'tentative';
         if (confidence === 'explicit' && !sourceIds.some(id => byId.get(id).note) && !(unchanged && userAnchored)) confidence = 'tentative';
         if (confidence === 'repeated' && new Set(sourceIds.map(id => byId.get(id).index)).size < 2) confidence = 'tentative';
-        return { id: uid(), category: item.category, text: item.text.trim(), confidence: unchanged?.manual ? 'manual' : confidence, sourceIds, sourceKeys: sourceIds.map(id => feedbackKey(byId.get(id))), previousItemIds, userAnchored, enabled: unchanged?.manual ? unchanged.enabled : true, manual: Boolean(unchanged?.manual) };
+        return { id: uid(), category, text: item.text.trim(), confidence: unchanged?.manual ? 'manual' : confidence, sourceIds, sourceKeys: sourceIds.map(id => feedbackKey(byId.get(id))), previousItemIds, userAnchored, enabled: unchanged?.manual ? unchanged.enabled : true, manual: Boolean(unchanged?.manual) };
     });
     return { items, summary: data.summary.slice(0, 1500), categoryReports };
 }

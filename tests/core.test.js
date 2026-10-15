@@ -418,7 +418,7 @@ test('无评分来源的用户补充可通过历史 ID 保留，伪造历史来�
     const previous = structuredClone(ctl.state().profile);
     h.ctx.chat.push({ mes: 'user', is_user: true }, { mes: '新回复' });
     await ctl.saveFeedback(3, { note: '新评价' }); invalid = true;
-    await assert.rejects(ctl.analyze(), /无效内容或反馈来源/);
+    await assert.rejects(ctl.analyze(), /反馈来源或历史条目 ID 不存在/);
     assert.deepEqual(ctl.state().profile, previous);
     assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 1);
 });
@@ -435,4 +435,95 @@ test('旧候选自动生效，手动停用保留，历史快照同步迁移且�
     assert.match(buildInjection(h.ctx.chat, migrated), /细微行动/);
     assert.doesNotMatch(buildInjection(h.ctx.chat, migrated), /手动停用/);
     assert.equal(pendingFeedback(h.ctx.chat, migrated).length, 0);
+});
+
+test('旧手动条目原样返回可保留；来源字段只接受已知精确 ID', () => {
+    const previous = [{ id: 'old-item', category: 'expression', text: '减少空泛抒情', manual: true, confidence: 'manual', enabled: false, sourceIds: [] }];
+    const data = { summary: '保留旧条目', categoryReports: reports, items: [{ ...previous[0], sourceIds: [] }] };
+    const parsed = parseResult(JSON.stringify(data), [], { previousItems: previous });
+    assert.equal(parsed.items[0].userAnchored, true);
+    assert.equal(parsed.items[0].confidence, 'manual');
+    assert.equal(parsed.items[0].enabled, false);
+    data.items[0] = { category: '表达细节', text: '减少空泛抒情', confidence: 'manual', sourceIds: 'old-item', previousItemIds: 'new-feedback' };
+    const swapped = parseResult(JSON.stringify(data), [{ id: 'new-feedback', note: '少一点抒情' }], { previousItems: previous });
+    assert.deepEqual(swapped.items[0].sourceIds, ['new-feedback']);
+    data.items[0].sourceIds = 'unknown';
+    assert.throws(() => parseResult(JSON.stringify(data), [{ id: 'new-feedback' }], { previousItems: previous }), /第 1 条补充.*ID 不存在/);
+    const fresh = parseResult(result('f1', 'manual'), [{ id: 'f1', note: '关心克制些' }]).items[0];
+    assert.equal(fresh.manual, false);
+    assert.equal(fresh.confidence, 'tentative');
+});
+
+test('调试台保留两次原文；一次格式修复成功只消费一次评价，清空不影响存档', async () => {
+    const h = host(), prompts = [];
+    const invalid = '<img src=x onerror=alert(1)> invalid JSON';
+    const ctl = h.make(async (ctx, settings, prompt) => {
+        prompts.push(JSON.parse(prompt));
+        return prompts.length === 1 ? invalid : result(currentFeedback(ctx.chat[1]).id);
+    });
+    await ctl.saveFeedback(1, { note: '行动表达关心' });
+    ctl.settings().threshold = 1;
+    await ctl.analyze({ automatic: true });
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[1].responseRepair.invalidResponse, invalid);
+    assert.deepEqual(prompts[1].feedback, prompts[0].feedback);
+    assert.equal(ctl.state().consumed.length, 1);
+    assert.equal(ctl.analysisAttempt.status, 'applied');
+    assert.equal(ctl.analysisAttempt.repairAttempts, 1);
+    assert.equal(ctl.analysisDebug[0].requests[0].response, invalid);
+    assert.match(ctl.analysisDebug[0].requests[0].validationError, /JSON/);
+    assert.equal(ctl.analysisDebug[0].requests[1].response, result(currentFeedback(h.ctx.chat[1]).id));
+    assert.equal(JSON.stringify(h.ctx.chatMetadata).includes(invalid), false);
+    const saved = structuredClone(h.ctx.chatMetadata);
+    ctl.clearDebug();
+    assert.deepEqual(ctl.analysisDebug, []);
+    assert.deepEqual(ctl.analysisAttempt.requests, []);
+    assert.deepEqual(h.ctx.chatMetadata, saved);
+});
+
+test('格式修复仍失败只调用两次，保留 A 和待分析评价，错误及原文可查', async () => {
+    const h = host(); let calls = 0;
+    const ctl = h.make(async () => { calls++; return result('invented-feedback'); });
+    await ctl.addItem('expression', '旧修正 A');
+    await ctl.saveFeedback(1, { note: '新评价' });
+    ctl.settings().threshold = 1;
+    const before = structuredClone(ctl.state());
+    await assert.rejects(ctl.analyze({ automatic: true }), /本批未应用.*第 1 条补充.*ID 不存在/);
+    assert.equal(calls, 2);
+    assert.deepEqual(ctl.state(), before);
+    assert.equal(pendingFeedback(h.ctx.chat, ctl.state()).length, 1);
+    assert.equal(ctl.analysisAttempt.status, 'failed');
+    assert.equal(ctl.analysisDebug[0].requests.length, 2);
+    for (const request of ctl.analysisDebug[0].requests) {
+        assert.equal(request.response, result('invented-feedback'));
+        assert.match(request.validationError, /ID 不存在/);
+    }
+});
+
+test('格式修复期间切换存档不写入任一存档，调试记录随存档隔离', async () => {
+    const h = host(); let finish, calls = 0;
+    const ctl = h.make(async () => { calls++; return calls === 1 ? 'invalid' : new Promise(resolve => { finish = resolve; }); });
+    await ctl.saveFeedback(1, { note: '偏好' });
+    const id = currentFeedback(h.ctx.chat[1]).id;
+    const pending = ctl.analyze();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls, 2);
+    const second = { ...h.ctx, chatId: 'save-b', chatMetadata: {}, chat: [] };
+    h.switchChat(second); ctl.refresh();
+    assert.deepEqual(ctl.analysisDebug, []);
+    finish(result(id)); await pending;
+    assert.equal(second.chatMetadata[KEY].profile.length, 0);
+    h.switchChat(h.ctx); ctl.refresh();
+    assert.equal(ctl.state().consumed.length, 0);
+    assert.equal(ctl.analysisDebug[0].status, 'cancelled');
+});
+
+test('调试历史仅保留最近十批；API 请求异常也记录原因', async () => {
+    const h = host(), ctl = h.make(async () => { throw new Error('模拟 API 503'); });
+    await ctl.saveFeedback(1, { note: '偏好' });
+    for (let i = 0; i < 11; i++) await assert.rejects(ctl.analyze(), /API 503/);
+    assert.equal(ctl.analysisDebug.length, 10);
+    assert.equal(ctl.analysisDebug.at(-1).requests.length, 1);
+    assert.equal(ctl.analysisDebug.at(-1).requests[0].error, '模拟 API 503');
+    assert.equal(ctl.state().consumed.length, 0);
 });

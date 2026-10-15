@@ -2,10 +2,10 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 const html = await readFile(new URL('./preview.html', import.meta.url));
-const allowed = new Set(['index.js', 'core.js', 'controller.js', 'api.js', 'updates.js', 'style.css']);
+const allowed = new Set(['index.js', 'core.js', 'controller.js', 'api.js', 'updates.js', 'debug-config.js', 'style.css']);
 const server = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
-    if (pathname === '/fixture-update-manifest') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ version: '0.7.0' })); return; }
+    if (pathname === '/fixture-update-manifest') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ version: '0.7.1' })); return; }
     if (pathname === '/api/extensions/discover') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify([{name:'third-party/Mweo-Correction-Center',type:'local'}])); return; }
     if (pathname === '/api/extensions/update') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({isUpToDate:false,shortCommitHash:'fixture'})); return; }
     if (pathname === '/script.js') { res.setHeader('Content-Type', 'text/javascript; charset=utf-8'); res.end('export const isGenerating = () => false;'); return; }

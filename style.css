@@ -58,6 +58,12 @@
 .rpp-item-text { white-space: pre-wrap; line-height: 1.75; }
 .rpp-item-edit { border-top: 1px solid var(--rpp-rule); padding-top: 4px; }
 .rpp-item-edit > summary { font-size: 12px; }
+.rpp-debug-shortcut { align-self: flex-start; }
+.rpp-debug-console { border: 1px solid var(--rpp-rule); border-radius: 8px; padding: 8px; }
+.rpp-debug-batch { border-top: 1px solid var(--rpp-rule); margin-top: 12px; }
+.rpp-debug-record { padding: 8px 0; }
+.rpp-debug-record h4 { margin: 4px 0 8px; }
+.rpp-debug-console textarea { font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
 .rpp-analysis-summary { padding: 8px 0; }
 .rpp-feedback { margin-top: 12px; border-top: 1px solid var(--rpp-border); }
 .rpp-feedback > summary { font-size: 13px; }
